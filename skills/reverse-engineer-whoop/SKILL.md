@@ -56,6 +56,13 @@ Full detail in `resources/PROTOCOL.md`. Essentials:
   ToggleRealtimeHr `0x03` (1 Hz realtime stream), SendHistoricalData `0x16` + ACK `0x17`
   (incremental drain), GetBattery `0x1A`, ReportVersion `0x07`.
 
+## Demo data (fill-in template)
+The repo ships only **synthetic** data (fictional "Demo User"). To show the user what the
+finished dashboard looks like before touching their device:
+`python seed_demo.py` → `WHOOP_DB=data/whoop-demo.db python dashboard.py`. Their real run
+creates their own gitignored `whoop.db`. Never commit a real person's `whoop.db`/exports —
+`.gitignore` already blocks `*.db`, `.env`, `.tokens.json`, `.backup_key`, `backups/`.
+
 ## Build procedure (what the agent does)
 Work in a copy of `whoop-tools/`. Create a venv and `pip install -r requirements.txt`.
 
@@ -63,7 +70,7 @@ Work in a copy of `whoop-tools/`. Create a venv and `pip install -r requirements
    UUID. Confirm Device Info says `WHOOP Inc.` and battery reads.
 2. **Prove the command path.** `python whoop.py info` → battery + firmware version.
 3. **Live stream.** `python live.py` (writes `ble_hr` + a `live_hr_now` marker; dashboard
-   shows a ● LIVE badge). The user must WEAR the strap for a real pulse — on the charger
+   shows a Live pill). The user must WEAR the strap for a real pulse — on the charger
    it reports a flat resting value.
 4. **Drain history.** `python whoop.py drain` / the collector — incremental; stores raw
    frames losslessly (`ble_raw`, `history_*.ndjson`).
@@ -76,8 +83,15 @@ Work in a copy of `whoop-tools/`. Create a venv and `pip install -r requirements
    and `strap_samples` (event #63 = `0x3F` R10/R11 raw optical/PPG — keep raw, don't
    over-label fields that aren't verified for this event format).
 7. **Dashboard.** `python dashboard.py` → `http://localhost:8787` (Flask + SQLite,
-   ~6 MB RAM; Chart.js vendored locally so it works offline).
-8. **Automate + back up.** Load the two launchd agents (`com.whoop.collector` hourly:
+   ~6 MB RAM). The front end is static (`static/index.html`, `app.css`, `app.js`, vendored
+   Chart.js, works offline) and reads two JSON endpoints, `/api/summary` and `/api/live`.
+   Sections: Overview (recovery ring + live HR), Vitals vs 30-day baseline, Trends
+   (30D/90D/6M/1Y), Sleep, Activity (strain, HR zones, workouts), Device (battery, record
+   counts, firmware log). Reference screenshots (demo data): `images/02-dashboard.png`,
+   `images/03-trends-sleep.png`, `images/04-activity-device.png`.
+8. **Automate + back up.** The plists ship with a `__WHOOP_TOOLS_DIR__` placeholder:
+   fill it with the absolute path of the user's `whoop-tools/` while copying them into
+   `~/Library/LaunchAgents/` (see `whoop-tools/README.md`). Load the two launchd agents (`com.whoop.collector` hourly:
    drain → decode → API → encrypted backup → cloud push; `com.whoop.dashboard` always-on).
    Local backups are AES-256 encrypted (`.backup_key` — tell the user to save a copy).
    Optional Cloudflare D1 off-site backup via `cloud_sync.py` (token with Account > D1 > Edit).
@@ -96,7 +110,7 @@ Work in a copy of `whoop-tools/`. Create a venv and `pip install -r requirements
 ## Files in `whoop-tools/`
 `whoop.py` (protocol + CLI), `live.py` (live stream), `decode.py` (raw→structured),
 `whoop_api.py` (OAuth + v2 API), `db.py`, `collector.py` (background), `backup.py`
-(encrypted snapshots), `cloud_sync.py` (Cloudflare D1), `dashboard.py` (localhost),
+(encrypted snapshots), `cloud_sync.py` (Cloudflare D1), `dashboard.py` + `static/` (localhost),
 launchd plists, `requirements.txt`, `.env.example`.
 
 See `resources/PROTOCOL.md` (full protocol + command table) and `resources/WALKTHROUGH.md`

@@ -22,6 +22,14 @@ cp .env.example .env            # then paste your Client ID + Secret into .env
 .venv/bin/python whoop_api.py sync      # pulls your history into whoop.db
 ```
 
+## Preview with synthetic demo data (no real biometrics)
+```bash
+.venv/bin/python seed_demo.py                              # generates data/whoop-demo.db (fictional)
+WHOOP_DB=data/whoop-demo.db .venv/bin/python dashboard.py  # http://localhost:8787
+```
+The real pipeline creates your own `whoop.db` (gitignored). Never commit a real `whoop.db`
+or its exports — `.gitignore` blocks `*.db`, `data/`, `.env`, `.tokens.json`, `.backup_key`.
+
 ## Daily use
 
 ```bash
@@ -31,11 +39,14 @@ cp .env.example .env            # then paste your Client ID + Secret into .env
 # dashboard:
 .venv/bin/python dashboard.py           # http://localhost:8787
 ```
+![Dashboard overview (synthetic demo data)](../skills/reverse-engineer-whoop/images/02-dashboard.png)
 
 ## Run it automatically in the background (hourly)
 
+The plists contain a `__WHOOP_TOOLS_DIR__` placeholder. Fill in the absolute path of
+this folder while copying them (run from inside `whoop-tools/`):
 ```bash
-cp com.whoop.collector.plist ~/Library/LaunchAgents/
+sed "s|__WHOOP_TOOLS_DIR__|$PWD|g" com.whoop.collector.plist > ~/Library/LaunchAgents/com.whoop.collector.plist
 launchctl load ~/Library/LaunchAgents/com.whoop.collector.plist
 # logs: collector.out.log / collector.err.log
 # to stop: launchctl unload ~/Library/LaunchAgents/com.whoop.collector.plist
@@ -49,15 +60,19 @@ bonds to one device at a time).
   AES-256 encrypted with `.backup_key` if present. Keeps the last 30. Restore with:
   `.venv/bin/python backup.py decrypt backups/whoop-YYYYMMDD-HHMMSS.json.enc out.json`
   **Keep a copy of `.backup_key`** — without it the encrypted backups can't be opened.
-- **Cloud (Cloudflare D1):** add `CF_API_TOKEN` to `.env` (token with Account > D1 > Edit), then
-  `.venv/bin/python cloud_sync.py` pushes everything to the `whoop-backup` D1 database. Runs
+- **Cloud (Cloudflare D1):** add `CF_API_TOKEN` to `.env` (token with Account > D1 > Edit)
+  and `CF_D1_DATABASE_ID` (create a D1 database, e.g. `whoop-backup`, in your Cloudflare account),
+  then `.venv/bin/python cloud_sync.py` pushes everything to it. Runs
   automatically each collector cycle once the token is set.
 
 ## Always-on services (launchd)
 - `com.whoop.collector` — hourly: strap drain + live HR + API sync + decode + backup + cloud push
 - `com.whoop.dashboard` — keeps `http://localhost:8787` up (auto-restarts)
-```
-cp com.whoop.collector.plist com.whoop.dashboard.plist ~/Library/LaunchAgents/
+```bash
+# from inside whoop-tools/ (the placeholder becomes this folder's absolute path)
+for p in com.whoop.collector com.whoop.dashboard; do
+  sed "s|__WHOOP_TOOLS_DIR__|$PWD|g" $p.plist > ~/Library/LaunchAgents/$p.plist
+done
 launchctl load ~/Library/LaunchAgents/com.whoop.collector.plist
 launchctl load ~/Library/LaunchAgents/com.whoop.dashboard.plist
 ```
@@ -72,7 +87,8 @@ launchctl load ~/Library/LaunchAgents/com.whoop.dashboard.plist
 | `collector.py` | background collector (BLE drain + live + API + decode + backup + cloud) |
 | `backup.py` | encrypted local snapshots (+ `decrypt`) |
 | `cloud_sync.py` | push to Cloudflare D1 over REST |
-| `dashboard.py` | localhost visualization (vendored Chart.js, offline) |
+| `dashboard.py` + `static/` | localhost dashboard: Flask JSON API + static page (vendored Chart.js, offline) |
+| `seed_demo.py` | generates a synthetic demo DB (fictional "Demo User") for previews |
 | `history_*.ndjson` / `ble_raw` | lossless raw strap frames for future deeper decoding |
 
 ## Notes / honesty

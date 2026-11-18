@@ -2,7 +2,7 @@
 """SQLite store for WHOOP data from both the official API and the strap (BLE)."""
 import sqlite3, os, json, time
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "whoop.db")
+DB_PATH = os.environ.get("WHOOP_DB") or os.path.join(os.path.dirname(__file__), "whoop.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS api_sleep (
