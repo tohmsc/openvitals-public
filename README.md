@@ -44,17 +44,31 @@ When you run the real pipeline it creates your **own** `whoop.db` (gitignored) a
 from your strap + API. The demo DB is just the template so you know what "done" looks like.
 
 ## The dashboard
-A single offline page (`whoop-tools/static/`, vendored Chart.js, light/dark theme) with six
-sections: **Overview** (today's recovery ring + live heart-rate monitor), **Vitals** (HRV,
-resting HR, SpO₂, skin temp, respiratory rate vs. your 30-day baseline), **Trends**
-(recovery, HRV, resting HR over 30D/90D/6M/1Y), **Sleep** (last night's stages + nightly
-stage history), **Activity** (day strain, heart-rate zones, workouts) and **Device**
-(strap battery, stored record counts, decoded firmware log). Screenshots below use the
-synthetic demo data:
+A local, offline app (`whoop-tools/static/`, vendored Chart.js, light/dark theme):
 
-![Overview and vitals](skills/reverse-engineer-whoop/images/02-dashboard.png)
-![Trends and sleep](skills/reverse-engineer-whoop/images/03-trends-sleep.png)
-![Activity and device](skills/reverse-engineer-whoop/images/04-activity-device.png)
+- **Heart** (full screen, the landing view): a 3D heart that beats on the strap's real beat
+  timing, metric callouts tied to the mesh, an exploded mode (`E`), full screen (`F`),
+  drag to rotate, a live pulse strip and a timeline.
+- **Today**: only what the strap recorded today (live monitor, heart rate over the day,
+  daytime HRV from RR intervals), compared against your archive baseline.
+- **Archive**: WHOOP cloud history behind a calendar. Every page is labelled with the day
+  you're viewing: recovery, vitals, trends, sleep, activity and workouts for that day.
+- **Device**: strap battery, stored record counts, decoded firmware log, and a **Resync**
+  button that runs one collector cycle.
+
+Screenshots below use the synthetic demo data:
+
+![Heart view](skills/reverse-engineer-whoop/images/02-dashboard.png)
+![Today](skills/reverse-engineer-whoop/images/03-trends-sleep.png)
+![Archive day](skills/reverse-engineer-whoop/images/04-activity-device.png)
+
+## Do it yourself with an agent
+Point your coding agent (Claude Code, Codex, Cursor) at
+[`skills/reverse-engineer-whoop/SKILL.md`](skills/reverse-engineer-whoop/SKILL.md). It walks
+from a blank machine to a running system in seven phases, each with a "done when" check, and
+`skills/reverse-engineer-whoop/scripts/doctor.py` tells it what's done and what's next.
+Setup, protocol, data model, dashboard, troubleshooting and the optional Cloudflare backup
+are in `skills/reverse-engineer-whoop/resources/`.
 
 ## What's here
 - `whoop-tools/` — the working system (BLE protocol, live stream, API sync, decode,

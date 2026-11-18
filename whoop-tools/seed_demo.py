@@ -9,12 +9,14 @@ today, so the demo always looks current. Replace it by syncing your own device.
 Usage:
   python seed_demo.py [OUTPUT_DB]        # default: data/whoop-demo.db
   WHOOP_DB=data/whoop-demo.db python dashboard.py   # preview it
+  python seed_demo.py --stream [DB]      # fake a live strap: synthetic HR/RR every second
 """
 import os, sys, sqlite3, random, math, json, time, datetime as dt
 import db     # reuse the real schema
 import decode  # device_soc / device_logs schema
 
-OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "whoop-demo.db")
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+OUT = ARGS[0] if ARGS else os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "whoop-demo.db")
 DAYS = 120
 random.seed(42)  # reproducible values (dates still move with "today")
 
@@ -184,5 +186,28 @@ def main():
     print(f"synthetic demo DB -> {OUT}  ({n} rows, fictional data)")
 
 
+def stream():
+    """Write a synthetic live heartbeat (same shape live.py writes) until Ctrl-C."""
+    c = sqlite3.connect(OUT)
+    t, hr = 0, 62.0
+    print(f"streaming fake live HR into {OUT} (Ctrl-C to stop)")
+    try:
+        while True:
+            hr = max(48, min(110, hr + random.gauss(0, 0.6) + 0.15 * (62 - hr)))
+            cur = round(hr + 3 * math.sin(t / 4.5))   # breathing-driven variation
+            rr = [round(60000 / cur + random.gauss(0, 18))]
+            now = time.time()
+            c.execute("INSERT OR REPLACE INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)", (now, cur, " ".join(map(str, rr))))
+            c.execute("INSERT OR REPLACE INTO sync_state(key,value) VALUES('live_hr_now',?)",
+                      (json.dumps({"hr": cur, "rr_ms": rr, "ts": now}),))
+            c.commit()
+            t += 1
+            time.sleep(1)
+    except KeyboardInterrupt:
+        c.execute("INSERT OR REPLACE INTO sync_state(key,value) VALUES('live_hr_now',?)",
+                  (json.dumps({"hr": None, "ts": time.time()}),))
+        c.commit()
+
+
 if __name__ == "__main__":
-    main()
+    stream() if "--stream" in sys.argv else main()

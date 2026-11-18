@@ -26,7 +26,12 @@ cp .env.example .env            # then paste your Client ID + Secret into .env
 ```bash
 .venv/bin/python seed_demo.py                              # generates data/whoop-demo.db (fictional)
 WHOOP_DB=data/whoop-demo.db .venv/bin/python dashboard.py  # http://localhost:8787
+.venv/bin/python seed_demo.py --stream                     # optional: fake a live strap (HR/RR every second)
 ```
+The app opens on the full-screen **Heart** view. **Today** shows only strap data recorded
+today; **Archive** holds the WHOOP cloud history behind a calendar. **Resync** (sidebar,
+Today, Heart toolbar) runs one collector cycle. Set `WHOOP_HOME` if `.env`/`.tokens.json`
+live in a different folder from the dashboard.
 The real pipeline creates your own `whoop.db` (gitignored). Never commit a real `whoop.db`
 or its exports — `.gitignore` blocks `*.db`, `data/`, `.env`, `.tokens.json`, `.backup_key`.
 

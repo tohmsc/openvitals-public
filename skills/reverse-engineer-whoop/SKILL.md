@@ -1,117 +1,171 @@
 ---
 name: reverse-engineer-whoop
 description: >
-  Help someone pull their own data off a WHOOP strap and run it locally, so they
-  own their biometrics without depending on the subscription app. Use when a user
-  wants to read their WHOOP over Bluetooth, extract live heart rate / HRV / raw
-  sensor data, sync their WHOOP account via the official API, build a local
-  dashboard, or back the data up (locally + Cloudflare). Targets the WHOOP 4.0
-  (BLE service 61080001-8d6d-82b8-614a-1c8cb0f8dcc6); notes where 5.0/MG differ.
+  Stand up a local-first WHOOP data system on someone's own machine, from zero: read
+  their WHOOP 4.0 strap directly over Bluetooth (live heart rate, RR intervals, raw
+  history, battery, firmware logs), optionally pull their scored history from the
+  official WHOOP API, store everything in SQLite, run the full-screen localhost
+  dashboard (Heart, Today, Archive), and keep it syncing and backed up. Use when a user
+  wants to own their WHOOP data, read the strap without the app, build a WHOOP
+  dashboard, or reproduce github.com/tohmsc/whoop-os-public. Targets WHOOP 4.0 (BLE service
+  61080001-8d6d-82b8-614a-1c8cb0f8dcc6); notes where 5.0/MG differ.
 ---
 
 # Reverse-engineer your WHOOP (own your data)
 
-This skill reproduces a working, local-first WHOOP data system: live biometrics
-pulled straight off the strap over Bluetooth, the user's full history from the
-official WHOOP API, a localhost dashboard, and automatic encrypted + cloud backups.
-The complete code is in the `whoop-tools/` directory of this repo — this file tells
-an agent how to stand it up on someone else's machine and adapt it.
+This skill rebuilds a working system that already exists: the code is
+[github.com/tohmsc/whoop-os-public](https://github.com/tohmsc/whoop-os-public), folder `whoop-tools/`.
+You do not need to reverse engineer the protocol again. Your job is to install it on
+the user's machine, prove each layer works, and adapt it to what they have.
 
-## Scope, honesty, and safety (read first, tell the user)
-- **Their own device, their own data.** This is personal interoperability/backup, not
-  cracking someone else's. Don't help point it at a device the user doesn't own.
-- **Not a medical device.** Good for fitness/self-tracking; never for clinical decisions.
-- **Reverse-engineered → fragile.** A WHOOP firmware update can change the BLE protocol.
-  The official **API** is the stable path; the **strap BLE** path is the bonus.
-- **Scored metrics (Recovery, Strain, Sleep stages, HRV baseline) are computed in
-  WHOOP's cloud**, not on the strap. Get those from the API. The strap gives the raw
-  signals (HR, RR/HRV, accelerometer, raw optical/PPG, SpO₂, skin temp).
-- **One bond at a time.** The strap talks to one device at a time — the official phone
-  app must be disconnected while your code syncs.
-- **Platform reality:** Apple HealthKit is iOS-only and cannot be read/written from
-  macOS or Python. "Sync to Apple Health" needs a native iOS app; this system is
-  Mac/Python + localhost instead.
+What they end up with:
 
-## Identify the hardware
-- WHOOP 4.0 advertises a custom GATT service **`61080001-8d6d-82b8-614a-1c8cb0f8dcc6`**
-  (the `6108xxxx-…` family = GEN_4). **Match on this service UUID, not the device name**
-  — users often rename the strap, and a renamed strap can collide with other devices
-  (in the original build, the user's iPhone and strap were given the same custom name; an earlier
-  attempt connected to the phone by mistake). WHOOP 5.0/MG use `fd4b0001-…` and a
-  different CRC (CRC16) — see `resources/PROTOCOL.md`.
-- The USB-C charger shows up as an **FTDI FT230X UART** (`/dev/cu.usbserial-*`). That UART
-  is the battery-pack telemetry link, **not** a login console — the strap is a bare-metal
-  Nordic nRF MCU, no shell. Don't chase a shell there; go via BLE.
+- Live heart rate and RR intervals straight off the strap, no WHOOP app involved.
+- The strap's stored history drained losslessly into SQLite, plus battery and the
+  decoded firmware console.
+- Optionally, their scored WHOOP history (recovery, HRV, sleep, strain, workouts)
+  from the official API, kept as a dated archive.
+- A full-screen dashboard on `http://localhost:8787` with a Resync button.
+- An hourly background collector and encrypted local backups. Cloudflare D1 off-site
+  backup only if they want it.
 
-## The protocol (verified, CRC-checked)
-Full detail in `resources/PROTOCOL.md`. Essentials:
+## Read first, and tell the user
+
+- **Their own strap, their own data.** Personal interoperability and backup. Never point
+  this at a device they don't own.
+- **Not a medical device.** Self-tracking only, no clinical decisions.
+- **The strap path is reverse engineered, so it can break.** A firmware update may change
+  the protocol. The official API is the stable path.
+- **Scores are computed in WHOOP's cloud.** Recovery, strain, sleep stages and the HRV
+  baseline are not on the strap. The strap gives raw signals: HR, RR, accelerometer, raw
+  optical, battery, logs. The API needs a WHOOP account, and it only returns data that
+  has reached WHOOP's servers (the strap must sync through the WHOOP phone app for new
+  scores to appear).
+- **One Bluetooth bond at a time.** Close the WHOOP phone app while this code talks to
+  the strap.
+- **Apple Health is iOS only.** HealthKit can't be written from macOS or Python.
+
+## Before you start: ask three things
+
+1. **Which strap?** WHOOP 4.0 is supported. 5.0/MG use a different service (`fd4b0001-…`)
+   and CRC16: the frame builder must be adapted first (`resources/PROTOCOL.md`).
+2. **Do they want their WHOOP account history too?** If yes, they need a WHOOP developer
+   app (free) and an account. If no, skip phase 5; everything else works.
+3. **Do they want off-site backup?** Default is local encrypted backups only. Cloudflare
+   D1 is optional (`resources/CLOUDFLARE.md`).
+
+Run `python skills/reverse-engineer-whoop/scripts/doctor.py whoop-tools` at any point. It
+is read-only, prints PASS/WARN/FAIL for every layer, and says the next command.
+
+## Phases (each has a "done when")
+
+Full commands and platform notes are in `resources/SETUP.md`.
+
+### 1. Get the code and dependencies
+```bash
+git clone https://github.com/tohmsc/whoop-os-public.git && cd whoop-os-public/whoop-tools
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+Done when: `doctor.py` shows Python 3.10+ and all four packages PASS.
+
+### 2. Show them the finished thing first (demo data)
+```bash
+.venv/bin/python seed_demo.py                                # fictional "Demo User"
+WHOOP_DB=data/whoop-demo.db .venv/bin/python dashboard.py    # http://localhost:8787
+.venv/bin/python seed_demo.py --stream                       # optional: fake live strap
+```
+Done when: they've seen the Heart view beating and agreed this is what they want. Stop
+the demo server before phase 3. Never mix demo and real data: sync is disabled on any
+database whose filename contains "demo".
+
+### 3. Find the strap and prove the command path
+- Grant the terminal Bluetooth permission (macOS: System Settings > Privacy & Security >
+  Bluetooth). Close the WHOOP phone app. Strap on the wrist or the charger, nearby.
+- `.venv/bin/python ble_scan.py` lists devices. **Match on the service UUID, never the
+  name.** Users rename straps, and in the original build the phone and the strap had the
+  same custom name, so name matching connected to the phone.
+- `.venv/bin/python whoop.py selftest` proves the frame builder byte for byte against
+  real captures. Then `.venv/bin/python whoop.py info` reads battery and firmware.
+
+Done when: `whoop.py info` prints a battery percentage and a firmware version.
+
+### 4. Live data and history off the strap
+- `.venv/bin/python live.py` streams 1 Hz heart rate and RR into `ble_hr` and writes the
+  `live_hr_now` marker the dashboard reads. The strap must be worn for a real pulse.
+- `.venv/bin/python collector.py --live 20` drains stored history (incremental, every
+  frame stored raw first in `ble_raw`), streams 20 s of live HR, then decodes.
+- `.venv/bin/python decode.py` turns raw frames into `realtime_hr`, `device_soc`
+  (battery), `device_logs` (firmware console) and `strap_samples` (raw optical, kept raw).
+
+Done when: `doctor.py` shows strap heart-rate samples and raw frames above zero.
+
+### 5. Optional: their WHOOP account history (official API)
+- Create an app at developer.whoop.com. Redirect URI exactly
+  `http://localhost:8765/callback`. Scopes: read:recovery, read:cycles, read:sleep,
+  read:workout, read:profile, read:body_measurement, offline.
+- `cp .env.example .env` and paste the Client ID and Secret. Never print or commit them.
+- `.venv/bin/python whoop_api.py login` (browser, once), then `whoop_api.py sync`.
+
+Done when: `doctor.py` shows recovery scores above zero. If the newest score is old, the
+account simply has nothing newer (check by syncing the strap in the WHOOP phone app).
+
+### 6. The dashboard
+`.venv/bin/python dashboard.py` → `http://localhost:8787`. Details in `resources/DASHBOARD.md`.
+
+- **Heart** (landing, full screen): a 3D heart beating on the strap's real beat timing
+  (RR intervals when live, else 60/HR), callouts tied to the mesh, exploded view (`E`),
+  full screen (`F`), drag to rotate, a pulse strip labelled as synthesized from beat
+  timing (it is not an ECG).
+- **Today**: only strap data since midnight, compared against the archive baseline.
+- **Archive**: the WHOOP API history behind a calendar, always labelled with its date and
+  marked as not today. Never present archive scores as today's.
+- **Resync** (sidebar, Today, Heart toolbar): runs one collector cycle.
+
+Done when: Today shows today's strap samples, and the calendar opens archive days (if
+they did phase 5).
+
+### 7. Keep it running and backed up
+- `openssl rand -hex 32 > .backup_key`. Tell the user to save a copy: without it the
+  encrypted backups can't be opened.
+- launchd (macOS): the plists contain `__WHOOP_TOOLS_DIR__`. Fill in the absolute path
+  while copying (commands in `whoop-tools/README.md`), then `launchctl load` both:
+  `com.whoop.collector` hourly, `com.whoop.dashboard` always on.
+- Linux: a systemd user timer for `collector.py` and a service for `dashboard.py`
+  (`resources/SETUP.md`).
+
+Done when: `doctor.py` shows both services loaded and a backup appears in `backups/`.
+
+## The protocol in one screen
+Full detail in `resources/PROTOCOL.md`.
+
 - **Frame:** `AA | LEN(u16 LE = len(inner)+4) | CRC8(LEN) | inner | CRC32(inner, LE)`,
   `inner = [type][seq][cmd][data]`.
-- **CRCs are STANDARD**, not custom: CRC-8/SMBUS (poly 0x07) over the 2 length bytes,
-  CRC-32/ISO-HDLC (`binascii.crc32`) over `inner`. Blogs claiming a "custom CRC" are
-  wrong — that misconception is why naive attempts fail. `whoop.py selftest` proves the
-  builder against real captured frames.
-- **GATT:** write commands to char `…0002`; notifications on `…0003/0004/0005/0007`.
-- **Useful commands:** ToggleGenericHrProfile `0x0E` (standard HR broadcast on/off),
-  ToggleRealtimeHr `0x03` (1 Hz realtime stream), SendHistoricalData `0x16` + ACK `0x17`
-  (incremental drain), GetBattery `0x1A`, ReportVersion `0x07`.
+- **The CRCs are standard:** CRC-8/SMBUS (poly 0x07) over the two length bytes,
+  CRC-32/ISO-HDLC (`binascii.crc32`) over `inner`. Claims of a "custom CRC" are wrong.
+- **GATT:** write to `…0002`; notifications on `…0003`, `…0004`, `…0005`, `…0007`.
+- **Commands:** ToggleGenericHrProfile `0x0E`, ToggleRealtimeHr `0x03`, SendHistoricalData
+  `0x16` + ACK `0x17`, GetBattery `0x1A`, ReportVersion `0x07`, SetClock `0x0A`.
 
-## Demo data (fill-in template)
-The repo ships only **synthetic** data (fictional "Demo User"). To show the user what the
-finished dashboard looks like before touching their device:
-`python seed_demo.py` → `WHOOP_DB=data/whoop-demo.db python dashboard.py`. Their real run
-creates their own gitignored `whoop.db`. Never commit a real person's `whoop.db`/exports —
-`.gitignore` already blocks `*.db`, `.env`, `.tokens.json`, `.backup_key`, `backups/`.
+## Rules for the agent
 
-## Build procedure (what the agent does)
-Work in a copy of `whoop-tools/`. Create a venv and `pip install -r requirements.txt`.
+- Verify each phase with `doctor.py` before starting the next.
+- Store raw first, decode later. Never drop frames you can't parse yet.
+- Don't label raw sensor fields you haven't verified with a controlled capture.
+- Never print `.env`, `.tokens.json` or `.backup_key` contents, and never commit `whoop.db`,
+  exports or backups (`.gitignore` already blocks them; keep it that way).
+- Show data age honestly. Strap data is "today"; API data is a dated archive.
+- When something fails, check `resources/TROUBLESHOOTING.md` before improvising.
 
-1. **Discover the strap.** `python whoop.py ...` / a BLE scan filtered by the service
-   UUID. Confirm Device Info says `WHOOP Inc.` and battery reads.
-2. **Prove the command path.** `python whoop.py info` → battery + firmware version.
-3. **Live stream.** `python live.py` (writes `ble_hr` + a `live_hr_now` marker; dashboard
-   shows a Live pill). The user must WEAR the strap for a real pulse — on the charger
-   it reports a flat resting value.
-4. **Drain history.** `python whoop.py drain` / the collector — incremental; stores raw
-   frames losslessly (`ble_raw`, `history_*.ndjson`).
-5. **Official API.** Create a WHOOP dev app at developer.whoop.com (redirect
-   `http://localhost:8765/callback`, scopes recovery/cycles/sleep/workout/profile/
-   body_measurement/offline). Put Client ID/Secret in `.env`. `python whoop_api.py login`
-   then `sync`. This pulls the scored metrics into the same SQLite DB.
-6. **Decode.** `python decode.py` turns raw frames into `realtime_hr`, `device_soc`
-   (battery from firmware `SOC report` logs), `device_logs` (readable firmware console),
-   and `strap_samples` (event #63 = `0x3F` R10/R11 raw optical/PPG — keep raw, don't
-   over-label fields that aren't verified for this event format).
-7. **Dashboard.** `python dashboard.py` → `http://localhost:8787` (Flask + SQLite,
-   ~6 MB RAM). The front end is static (`static/index.html`, `app.css`, `app.js`, vendored
-   Chart.js, works offline) and reads two JSON endpoints, `/api/summary` and `/api/live`.
-   Sections: Overview (recovery ring + live HR), Vitals vs 30-day baseline, Trends
-   (30D/90D/6M/1Y), Sleep, Activity (strain, HR zones, workouts), Device (battery, record
-   counts, firmware log). Reference screenshots (demo data): `images/02-dashboard.png`,
-   `images/03-trends-sleep.png`, `images/04-activity-device.png`.
-8. **Automate + back up.** The plists ship with a `__WHOOP_TOOLS_DIR__` placeholder:
-   fill it with the absolute path of the user's `whoop-tools/` while copying them into
-   `~/Library/LaunchAgents/` (see `whoop-tools/README.md`). Load the two launchd agents (`com.whoop.collector` hourly:
-   drain → decode → API → encrypted backup → cloud push; `com.whoop.dashboard` always-on).
-   Local backups are AES-256 encrypted (`.backup_key` — tell the user to save a copy).
-   Optional Cloudflare D1 off-site backup via `cloud_sync.py` (token with Account > D1 > Edit).
+## Resources
 
-## Gotchas that cost time (so the next person skips them)
-- Match on **service UUID**, never the advertised name.
-- Standard HR characteristic (`0x2A37`) only emits after the custom enable command AND
-  with skin contact.
-- Realtime packet `ts` is the device RTC counter, not Unix; historical records use Unix.
-  If the firmware logs "RTC timestamp invalid," the strap's clock was never set — send
-  SetClock (`0x0A`).
-- In a Python page-template string, `'\n'` becomes a real newline and breaks inline JS —
-  escape as `\\n` (this silently blanked the whole dashboard once).
-- Headless screenshots can fire before a CDN loads — vendor Chart.js locally.
-
-## Files in `whoop-tools/`
-`whoop.py` (protocol + CLI), `live.py` (live stream), `decode.py` (raw→structured),
-`whoop_api.py` (OAuth + v2 API), `db.py`, `collector.py` (background), `backup.py`
-(encrypted snapshots), `cloud_sync.py` (Cloudflare D1), `dashboard.py` + `static/` (localhost),
-launchd plists, `requirements.txt`, `.env.example`.
-
-See `resources/PROTOCOL.md` (full protocol + command table) and `resources/WALKTHROUGH.md`
-(the end-to-end prompts/path the original build followed).
+| File | What it covers |
+| --- | --- |
+| `resources/SETUP.md` | Every command from a blank machine, macOS and Linux, plus services |
+| `resources/PROTOCOL.md` | Frame format, CRCs, packet types, command table, 5.0/MG notes |
+| `resources/DATA-MODEL.md` | Every SQLite table, what fills it, how fresh it is |
+| `resources/DASHBOARD.md` | Endpoints, Today vs Archive model, how to adapt the UI |
+| `resources/TROUBLESHOOTING.md` | Symptom, cause and fix for everything that went wrong |
+| `resources/CLOUDFLARE.md` | Optional Cloudflare D1 off-site backup |
+| `resources/WALKTHROUGH.md` | How the original build went, as prompts you can reuse |
+| `scripts/doctor.py` | Read-only preflight and progress check |
+| `images/` | Screenshots of the dashboard with synthetic demo data |
