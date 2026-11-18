@@ -1,0 +1,13 @@
+.venv/
+.env
+.tokens.json
+*.db
+*.csv
+*.log
+*.ndjson
+__pycache__/
+.backup_key
+backups/
+.tokens.json.*
+d1_batches/
+history_*.json
