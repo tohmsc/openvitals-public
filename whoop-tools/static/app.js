@@ -709,22 +709,33 @@
   }
 
   /* ───────── Live heart rate ───────── */
+  // A reading counts as "now" while the strap streams, or for a few minutes after (the phone gets
+  // the Mac's copy every few minutes). Older than that there is no current value: an old number
+  // is never shown as now.
+  const FRESH_MS = 15 * 6e4;
+  function currentHr(L) {
+    if (L?.live) return L.hr;
+    const last = (L?.recent || []).filter((r) => r.hr).at(-1);
+    return last && Date.now() - last.ts * 1000 < FRESH_MS ? last.hr : null;
+  }
   let lastLive = null;
   function renderLive(L) {
     lastLive = L;
     const card = $(".card--monitor");
     const pill = $("#live-pill"), pillText = $("#live-pill-text");
-    const recent = (L?.recent || []).filter((r) => r.hr);
+    const all = (L?.recent || []).filter((r) => r.hr);
+    const today = ymd(Date.now());
+    const recent = all.filter((r) => ymd(r.ts * 1000) === today); // the trace and its stats are today's samples only
     const live = !!L?.live;
     card.dataset.live = String(live);
     pill.dataset.state = live ? "live" : "off";
     pillText.textContent = live ? "Live" : "Offline";
     $("#side-dot").dataset.state = live ? "live" : "off";
     $("#side-device").textContent = live ? "WHOOP 4.0 · streaming" : "WHOOP 4.0";
-    const hr = live ? L.hr : recent.at(-1)?.hr;
+    const hr = currentHr(L);
     $("#live-hr").textContent = hr ?? "—";
     if (live && hr) card.style.setProperty("--beat", `${(60 / hr).toFixed(2)}s`);
-    const lastTs = L?.ts ? L.ts * 1000 : recent.at(-1)?.ts * 1000;
+    const lastTs = L?.ts ? L.ts * 1000 : all.at(-1)?.ts * 1000;
     $("#live-note").textContent = live
       ? "Streaming from the strap"
       : lastTs ? `Last reading ${ago(lastTs)}.${DATA?.cloud ? " Synced from your Mac." : " Run daemon.py to stream."}` : DATA?.cloud ? "No readings synced yet." : "No readings yet. Run daemon.py with the strap nearby.";
@@ -815,7 +826,7 @@
   const fromYmd = (k) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
   let PERIOD = "today", ADATE = null; // ADATE = "YYYY-MM-DD" of the archive day being viewed
   let REC_BY_DAY = new Map();
-  const VS = (window.VITALS = { get period() { return PERIOD; }, get date() { return ADATE; }, today: null, baseline: null, setPeriod, setDate, openCal });
+  const VS = (window.VITALS = { get period() { return PERIOD; }, get date() { return ADATE; }, today: null, baseline: null, setPeriod, setDate, openCal, currentHr });
 
   // Archive lens: everything up to the end of the chosen day, so "latest" = that day.
   function V() {

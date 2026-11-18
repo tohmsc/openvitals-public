@@ -26,7 +26,9 @@ Environment: `WHOOP_DB` (database path), `PORT` (default 8787), `WHOOP_HOME` (fo
 
 - **Heart** (`#heart`, the landing view). A heart surface (Taubin's implicit heart,
   ray-solved into a 30 × 96 lat/long mesh) drawn on canvas. It beats on real timing: the
-  strap's RR intervals when live, otherwise 60/HR from the last reading. Exploded mode
+  strap's RR intervals when live, otherwise 60/HR from the last reading while that reading
+  is under 15 minutes old. After that there is no current heart rate and the heart is still;
+  an old number is never shown as now. Exploded mode
   splits the mesh into five slices, each carrying one callout. The pulse strip is a PQRST
   shape placed on each beat; it is synthesized and says so.
 - **Today** (`#today`). Only `today_hr`. Recorded minutes, average and lowest HR, daytime
