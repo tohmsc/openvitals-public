@@ -11,3 +11,5 @@ backups/
 .tokens.json.*
 d1_batches/
 history_*.json
+data/
+*.lock

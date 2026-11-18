@@ -32,6 +32,30 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 Full setup, backups, and the hourly background service are in **`whoop-tools/README.md`**.
 
+## Preview with demo data (fill-in template)
+This repo ships **synthetic demo data only** — a fictional "Demo User", no real person's
+biometrics. See the dashboard populated before connecting anything:
+```bash
+cd whoop-tools
+.venv/bin/python seed_demo.py                              # (re)generate data/whoop-demo.db
+WHOOP_DB=data/whoop-demo.db .venv/bin/python dashboard.py  # http://localhost:8787
+```
+When you run the real pipeline it creates your **own** `whoop.db` (gitignored) and fills it
+from your strap + API. The demo DB is just the template so you know what "done" looks like.
+
+## The dashboard
+A single offline page (`whoop-tools/static/`, vendored Chart.js, light/dark theme) with six
+sections: **Overview** (today's recovery ring + live heart-rate monitor), **Vitals** (HRV,
+resting HR, SpO₂, skin temp, respiratory rate vs. your 30-day baseline), **Trends**
+(recovery, HRV, resting HR over 30D/90D/6M/1Y), **Sleep** (last night's stages + nightly
+stage history), **Activity** (day strain, heart-rate zones, workouts) and **Device**
+(strap battery, stored record counts, decoded firmware log). Screenshots below use the
+synthetic demo data:
+
+![Overview and vitals](skills/reverse-engineer-whoop/images/02-dashboard.png)
+![Trends and sleep](skills/reverse-engineer-whoop/images/03-trends-sleep.png)
+![Activity and device](skills/reverse-engineer-whoop/images/04-activity-device.png)
+
 ## What's here
 - `whoop-tools/` — the working system (BLE protocol, live stream, API sync, decode,
   dashboard, encrypted backups, Cloudflare D1 sync, launchd services).

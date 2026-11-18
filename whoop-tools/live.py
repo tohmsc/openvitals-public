@@ -19,10 +19,16 @@ _stop = False
 def _cleanup(*a):
     global _stop; _stop = True
 
+def _env_addr():
+    p = os.path.join(HERE, ".env")
+    if os.path.exists(p):
+        for line in open(p):
+            if line.startswith("WHOOP_BLE_ADDRESS="):
+                return line.strip().split("=", 1)[1] or None
+    return None
+
 async def stream_once(c):
-    addr = (open(os.path.join(HERE, ".env")).read().split("WHOOP_BLE_ADDRESS=")[1].split()[0]
-            if os.path.exists(os.path.join(HERE, ".env")) and "WHOOP_BLE_ADDRESS=" in open(os.path.join(HERE, ".env")).read()
-            else await whoop.find())
+    addr = _env_addr() or await whoop.find()
     if not addr:
         print("strap not found"); return
     async with whoop.Whoop(addr) as w:
