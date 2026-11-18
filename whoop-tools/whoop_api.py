@@ -7,27 +7,20 @@ Then:       python whoop_api.py sync     (pulls new sleep/recovery/cycle/workout
 Credentials come from .env; the refresh token is stored in .tokens.json (gitignored).
 Nothing leaves your machine except calls to WHOOP's own servers.
 """
-import os, json, time, sys, base64, hashlib, secrets, threading, webbrowser, urllib.parse
+import os, json, time, sys, secrets, threading, webbrowser, urllib.parse, calendar
 import http.server, socketserver, fcntl
 import requests
-import db
+import config, db
 
-HERE = os.path.dirname(__file__)
+HERE = config.HERE
 TOKENS = os.path.join(HERE, ".tokens.json")
 AUTH_URL  = "https://api.prod.whoop.com/oauth/oauth2/auth"
 TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token"
 API = "https://api.prod.whoop.com/developer"
 SCOPES = "read:recovery read:cycles read:sleep read:workout read:profile read:body_measurement offline"
 
-def env():
-    e = {}
-    p = os.path.join(HERE, ".env")
-    if os.path.exists(p):
-        for line in open(p):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1); e[k] = v
-    return e
+env = config.env
+OVERLAP_DAYS = 3          # re-read this much before the watermark on every sync
 
 def save_tokens(t):
     t["obtained_at"] = time.time()
@@ -125,10 +118,21 @@ def _g(d, *keys, default=None):
         d = d.get(k)
     return d if d is not None else default
 
+def _overlap(since):
+    """The watermark moved back a few days. WHOOP scores records after it first lists them
+    (a sleep appears PENDING, a day's strain keeps growing until the cycle closes), so the
+    recent ones are read again; upserts make that harmless."""
+    try:
+        t = calendar.timegm(time.strptime(since[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return since
+    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t - OVERLAP_DAYS * 86400))
+
+
 def sync():
     c = db.connect()
-    since = db.get_state(c, "api_since", "2020-01-01T00:00:00.000Z")
-    newest = since
+    newest = db.get_state(c, "api_since", "2020-01-01T00:00:00.000Z")
+    since = _overlap(newest)
     counts = {}
     # Sleep
     for s in paged("/v2/activity/sleep", since):
@@ -147,11 +151,11 @@ def sync():
             "total_rem_ms": _g(st, "total_rem_sleep_time_milli"),
             "disturbances": _g(st, "disturbance_count"),
             "raw": json.dumps(s)})
-        newest = max(newest, s.get("end") or since); counts["sleep"]=counts.get("sleep",0)+1
+        newest = max(newest, s.get("end") or newest); counts["sleep"]=counts.get("sleep",0)+1
     # Recovery
     for rv in paged("/v2/recovery", since):
         db.upsert(c, "api_recovery", {
-            "cycle_id": rv.get("cycle_id"), "sleep_id": str(rv.get("sleep_id")),
+            "cycle_id": rv.get("cycle_id"), "sleep_id": str(rv["sleep_id"]) if rv.get("sleep_id") is not None else None,
             "created_at": rv.get("created_at"), "score_state": rv.get("score_state"),
             "recovery_score": _g(rv, "score", "recovery_score"),
             "resting_hr": _g(rv, "score", "resting_heart_rate"),
@@ -191,6 +195,12 @@ def sync():
             db.upsert(c, "api_profile", {"key": k, "value": str(v)})
     except Exception as ex:
         print("profile:", ex)
+    # Body measurements: WHOOP's max heart rate for you (learn.py uses it for "heart rate up")
+    try:
+        for k, v in get("/v2/user/measurement/body").items():
+            db.upsert(c, "api_profile", {"key": k, "value": str(v)})
+    except Exception as ex:
+        print("body measurement:", ex)
     db.set_state(c, "api_since", newest); c.commit()
     print("API sync complete:", counts, "| watermark:", newest)
 

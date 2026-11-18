@@ -1,0 +1,15 @@
+{
+  "name": "Vitals",
+  "short_name": "Vitals",
+  "description": "Your WHOOP heart rate, recovery and sleep, synced from your strap.",
+  "start_url": "/#heart",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "icons": [
+    { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

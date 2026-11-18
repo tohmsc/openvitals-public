@@ -1,0 +1,4 @@
+wrangler.jsonc
+dist/
+.wrangler/
+node_modules/

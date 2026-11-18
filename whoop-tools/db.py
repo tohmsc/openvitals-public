@@ -29,13 +29,52 @@ CREATE TABLE IF NOT EXISTS ble_raw (
   ts REAL, channel TEXT, ptype INTEGER, hex TEXT);
 CREATE INDEX IF NOT EXISTS idx_ble_raw_ts ON ble_raw(ts);
 
+-- Strap clock vs wall clock. The strap stamps stored records with its own RTC
+-- counter, which is not Unix time and restarts when the strap resets. One row per
+-- (re)connect or clock jump: wall time = rtc + offset.
+CREATE TABLE IF NOT EXISTS clock_sync (
+  ts REAL PRIMARY KEY, rtc INTEGER, offset REAL);
+
+-- Raw frames that archive.py moved to Cloudflare R2 and removed from ble_raw:
+-- one object per UTC hour (hour = unix time / 3600).
+CREATE TABLE IF NOT EXISTS raw_archive (
+  key TEXT PRIMARY KEY, hour INTEGER, first_rowid INTEGER, last_rowid INTEGER,
+  rows INTEGER, bytes INTEGER, sha256 TEXT, encrypted INTEGER, archived_at REAL);
+
+-- One row per morning: last night's resting HR and HRV as measured from the strap.
+-- telegram_report.py uses the recent rows as "your usual".
+-- learn.py adds what the day before looked like, the call it made, and how you said you felt
+-- (feel: 1 rough, 2 ok, 3 good), and learns your usual and your thresholds from these rows.
+CREATE TABLE IF NOT EXISTS daily_night (date TEXT PRIMARY KEY, rhr REAL, hrv REAL,
+  load_s REAL, peak INTEGER, recorded_s REAL, score REAL, call TEXT, feel INTEGER, feel_ts REAL);
+
 CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT);
 """
+
+# Columns added after a table first shipped: (table, column, type). Added on connect if missing.
+ADDED = [("daily_night", col, typ) for col, typ in (
+    ("load_s", "REAL"), ("peak", "INTEGER"), ("recorded_s", "REAL"), ("score", "REAL"),
+    ("call", "TEXT"), ("feel", "INTEGER"), ("feel_ts", "REAL"))]
+
+def add_columns(c, added):
+    """ALTER TABLE for each (table, column, type) the database doesn't have yet."""
+    for table, col, typ in added:
+        have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+        if have and col not in have:
+            try:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError as ex:      # another process added it a moment ago
+                if "duplicate column" not in str(ex):
+                    raise
 
 def connect():
     c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
+    # WAL: the always-on daemon writes every second while the dashboard reads.
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("PRAGMA synchronous=NORMAL")
     c.executescript(SCHEMA)
+    add_columns(c, ADDED)
     return c
 
 def get_state(c, key, default=None):

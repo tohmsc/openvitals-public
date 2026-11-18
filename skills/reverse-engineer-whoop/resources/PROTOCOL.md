@@ -68,6 +68,15 @@ def frame(ptype, seq, cmd, data=b""):
 ## Notification parsing
 - **REALTIME_DATA (0x28):** `ts u32 LE @2`, `hr @8`, `rr_count @9`, up to 4×`u16 RR @10`
   (RR in 1/1024 s). `ts` is the device RTC counter (not Unix).
+- **HISTORICAL_DATA (0x2F):** the strap's own store, one 96-byte record per second,
+  `inner[1]` = record version (24 on Harvard 41.17.x), data = `inner[3:]`:
+  `seq u32 @0`, `ts u32 @4` (**Unix time**), `hr @14`, `rr_count @15`, 4×`u16 RR @16`
+  (1/1024 s, same as realtime). Verified against the live stream: HR agrees within 2 bpm
+  over overlapping seconds, and records keep accumulating while nothing is connected.
+  They only appeared once the strap's clock read real time; while its RTC sat near 1971
+  (after a reset) a drain returned just console logs and sparse events. Not verified: whether
+  our SetClock (0x0A) payload is what fixed the clock — six hourly runs sent it with no effect.
+  Fields after RR (accel, optical, skin temp) follow the V12 layout and are not verified.
 - **HISTORICAL drain:** arrives as METADATA (0x31: subtype 1 START, 2 END+trim@offset10,
   3 COMPLETE) + records. On some firmware the per-sample records come **event-framed**
   (type 0x30, cmd 3 and 63). `cmd 63 = 0x3F = R10/R11 raw optical (PPG)`. Capture raw;

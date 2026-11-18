@@ -33,6 +33,7 @@
   const canvas = $("#hv-canvas"), ctx = canvas.getContext("2d");
   const leaders = $("#hv-leaders");
   const calloutHost = $("#hv-callouts");
+  const head = $(".hv__head");
   const ecg = $("#hv-ecg"), ectx = ecg.getContext("2d");
 
   /* ───────── Routing: Heart view ↔ Dashboard ───────── */
@@ -85,7 +86,7 @@
 
   /* ───────── View state ───────── */
   let W = 0, H = 0, DPR = 1;
-  let yaw = 0.5, spin = !reduce.matches, dragging = false, lastX = 0, vel = 0;
+  let yaw = 0.25, phase = 0, spin = !reduce.matches, dragging = false, lastX = 0, vel = 0;
   let mode = "pulse", explode = 0; // explode animates 0 → 1
   let ink = "20,24,28", glowRGB = "255,72,110", lime = "#d6f53c";
   function readTheme() {
@@ -102,7 +103,6 @@
     canvas.width = W * DPR; canvas.height = H * DPR;
     const er = ecg.getBoundingClientRect();
     ecg.width = er.width * DPR; ecg.height = er.height * DPR;
-    sizeGlobes();
     layoutCallouts();
   }
   new ResizeObserver(resize).observe(stage);
@@ -143,11 +143,13 @@
   /* ───────── Data → callouts ───────── */
   let DATA = null, sel = -1; // index into ascending recovery
   let recAsc = [], sleepAsc = [];
+  // Two columns on the stage's own edges (same inset as the header and the buttons), two rows each.
+  // Order matters for phones, where they sit in a 2×2 grid in this order.
   const CALLOUTS = [
-    { key: "hr", side: "right", x: 0.735, y: 0.43, band: 2, lon: 0.0 },
-    { key: "hrv", side: "right", x: 0.705, y: 0.16, band: 4, lon: 0.12 },
-    { key: "spo2", side: "right", x: 0.69, y: 0.66, band: 1, lon: 0.9 },
-    { key: "rhr", side: "left", x: 0.1, y: 0.44, band: 3, lon: 0.5 },
+    { key: "hr", side: "left", y: 0.27, band: 2, lon: 0.5 },
+    { key: "hrv", side: "right", y: 0.27, band: 4, lon: 0.12 },
+    { key: "spo2", side: "right", y: 0.57, band: 1, lon: 0.9 },
+    { key: "rhr", side: "left", y: 0.57, band: 3, lon: 0.5 },
   ];
   CALLOUTS.forEach((c) => {
     const n = document.createElement("div");
@@ -159,7 +161,7 @@
     c.anchor = [Math.floor(((c.band + 0.5) / BANDS) * LAT), Math.floor(c.lon * LON) % LON];
   });
   // Leader SVG nodes
-  leaders.innerHTML = CALLOUTS.map((c) => `<g data-k="${c.key}"><path class="ld__line"/><circle class="ld__halo" r="14"/><circle class="ld__core" r="4.5"/></g>`).join("");
+  leaders.innerHTML = CALLOUTS.map((c) => `<g data-k="${c.key}"><path class="ld__line"/><circle class="ld__halo" r="14"/><circle class="ld__core" r="3"/></g>`).join("");
   CALLOUTS.forEach((c) => { c.g = leaders.querySelector(`g[data-k="${c.key}"]`); });
 
   function baselineAt(series, i) {
@@ -185,32 +187,32 @@
     const recent = (LIVE?.recent || []).filter((x) => x.hr);
     const lastHr = liveNow ? LIVE.hr : recent.at(-1)?.hr;
     const lastTs = LIVE?.ts ? LIVE.ts * 1000 : recent.at(-1)?.ts * 1000;
-    const hrTag = liveNow ? ["Live", "live"] : [lastTs ? `Last ${ago(lastTs)}` : "No signal", ""];
+    const hrTag = liveNow ? ["Live", "live"] : [lastTs ? `Last reading ${ago(lastTs)}` : "No signal", ""];
     let content;
     const r = recAsc[sel];
     if (today) {
       const T = window.VITALS?.today, B = window.VITALS?.baseline;
-      const vs = (b, unit) => (b?.mean ? `archive ${fmt(b.mean)} ${unit}` : "no baseline");
+      const vs = (b, unit) => (b?.mean ? `Usual ${fmt(b.mean)} ${unit}` : "No baseline yet");
       content = {
-        hr: [fmt(lastHr), "bpm", "heart rate now", hrTag],
-        hrv: [fmt(T?.rmssd), "ms", "HRV today (daytime RMSSD)", [T?.rmssd ? vs(B?.hrv, "ms overnight") : `${T?.nRR || 0} RR intervals so far`, ""]],
-        spo2: [fmt(T?.avg), "bpm", "average today", [T ? `since ${dTime.format(T.first)} · ${vs(B?.avgHr, "bpm")}` : "no data yet", ""]],
-        rhr: [fmt(T?.min), "bpm", "lowest today", [vs(B?.rhr, "bpm resting"), ""]],
+        hr: [fmt(lastHr), "bpm", "Heart rate now", hrTag],
+        hrv: [fmt(T?.rmssd), "ms", "HRV today", [T?.rmssd ? vs(B?.hrv, "ms at night") : `${T?.nRR || 0} beat intervals so far`, ""]],
+        spo2: [fmt(T?.avg), "bpm", "Average today", [T ? vs(B?.avgHr, "bpm") : "No data yet", ""]],
+        rhr: [fmt(T?.min), "bpm", "Lowest today", [vs(B?.rhr, "bpm resting"), ""]],
       };
     } else {
       const hrv = recAsc.map((x) => x.hrv_rmssd_ms), rhr = recAsc.map((x) => x.resting_hr), sp = recAsc.map((x) => x.spo2);
       const sIdx = sleepAsc.findIndex((x) => ymd(+new Date(x.end)) === ymd(+new Date(r?.created_at)));
       const sl = sleepAsc[sIdx];
       content = {
-        hr: [fmt(sl?.resp_rate, 1), "rpm", "respiratory rate", ["that night", "arch"]],
-        hrv: [fmt(r?.hrv_rmssd_ms), "ms", "heart rate variability", tagFor(hrv, sel)],
-        spo2: [fmt(r?.spo2, 1), "%", "blood oxygen", tagFor(sp, sel)],
-        rhr: [fmt(r?.resting_hr), "bpm", "resting heart rate", tagFor(rhr, sel, true)],
+        hr: [fmt(sl?.resp_rate, 1), "rpm", "Respiratory rate", ["That night", "arch"]],
+        hrv: [fmt(r?.hrv_rmssd_ms), "ms", "Heart rate variability", tagFor(hrv, sel)],
+        spo2: [fmt(r?.spo2, 1), "%", "Blood oxygen", tagFor(sp, sel)],
+        rhr: [fmt(r?.resting_hr), "bpm", "Resting heart rate", tagFor(rhr, sel, true)],
       };
     }
     for (const c of CALLOUTS) {
       const [v, u, label, [tag, tone]] = content[c.key];
-      const html = `<p class="co__num">${v}<small>${u}</small></p><p class="co__label">${label}</p><span class="co__tag" data-tone="${tone}">${esc(tag)}</span>`;
+      const html = `<p class="co__label">${label}</p><p class="co__num">${v}<small>${u}</small></p><p class="co__tag" data-tone="${tone}">${esc(tag)}</p>`;
       if (c.node.innerHTML !== html) c.node.innerHTML = html;
     }
     layoutCallouts();
@@ -222,14 +224,14 @@
       : r ? `Archive · ${dDay.format(rd)}, ${rd.getFullYear()}` : "Archive";
     const stale = $("#hv-stale");
     stale.hidden = today;
-    stale.textContent = "WHOOP history · not today";
+    stale.textContent = "WHOOP history, not today";
 
     // Side card: today = time on strap; archive = that day's recovery
     const card = $("#hv-rec"), num = card.querySelector(".hv-card__num");
     if (today) {
       const T = window.VITALS?.today;
       card.dataset.zone = "today";
-      card.querySelector(".hv-card__label").textContent = "Heart rate recorded today";
+      card.querySelector(".hv-card__label").textContent = "Recorded today";
       num.innerHTML = T ? `${Math.floor(T.activeMs / 36e5)}<small>h</small> ${Math.round((T.activeMs % 36e5) / 6e4)}<small>m</small>` : "—";
       $("#hv-rec-sub").textContent = T ? `since ${dTime.format(T.first)} · ${n0.format(T.samples.length)} samples` : "No strap data yet today";
       $("#hv-rec-zone").textContent = liveNow ? "Streaming" : "Strap idle";
@@ -237,14 +239,14 @@
       const score = r?.recovery_score;
       const z = score == null ? "none" : score >= 67 ? "good" : score >= 34 ? "fair" : "low";
       card.dataset.zone = z;
-      card.querySelector(".hv-card__label").textContent = "Recovery · archive";
+      card.querySelector(".hv-card__label").textContent = "Recovery";
       num.innerHTML = `${fmt(score)}<small>%</small>`;
       const sl = sleepAsc.find((x) => ymd(+new Date(x.end)) === ymd(+new Date(r?.created_at)));
       $("#hv-rec-sub").textContent = sl ? `${fmt(sl.sleep_perf)}% sleep performance` : " ";
       $("#hv-rec-zone").textContent = { good: "High", fair: "Moderate", low: "Low", none: "No score" }[z];
     }
     const total = Object.values(DATA.counts || {}).reduce((a, b) => a + b, 0);
-    $("#hv-count").textContent = `+${n0.format(total)}`;
+    $("#hv-count").textContent = n0.format(total);
     canvas.setAttribute("aria-label", `Animated heart${lastHr ? ` beating at ${lastHr} beats per minute` : ""}.`);
   }
 
@@ -256,17 +258,19 @@
       tl.setAttribute("role", "img");
       tl.removeAttribute("aria-label");
       if (!T) { tl.innerHTML = `<p class="tl__empty">No strap data yet today</p>`; return; }
-      // one bar per 2 minutes from first sample to now
-      const step = 120, t0 = Math.floor(T.first / 1000 / step) * step, t1 = Math.max(T.last / 1000, Date.now() / 1000);
+      // Up to 90 bars from the first sample to now: 2 minutes each, wider once the day is longer than 3 hours.
+      const first = T.first / 1000, t1 = Math.max(T.last / 1000, Date.now() / 1000);
+      const step = Math.max(120, Math.ceil((t1 - first) / 90 / 60) * 60), t0 = Math.floor(first / step) * step;
       const n = Math.min(90, Math.ceil((t1 - t0) / step));
       const bins = Array.from({ length: n }, () => []);
       for (const x of T.samples) { const i = Math.floor((x.ts - t0) / step); if (i >= 0 && i < n) bins[i].push(x.hr); }
       const lo = T.min - 5, hi = T.max + 5;
-      const every = Math.max(1, Math.round(n / 6));
+      const every = Math.max(1, Math.round(n / (W < 760 ? 3 : 6)));
       tl.setAttribute("aria-label", `Heart rate today, ${dTime.format(T.first)} to now`);
       tl.innerHTML = bins.map((b, i) => {
         const v = b.length ? b.reduce((a, c) => a + c, 0) / b.length : null;
-        const lbl = i % every === 0 || i === n - 1 ? (i === n - 1 ? "now" : dTime.format((t0 + i * step) * 1000)) : "";
+        // A time label that would run into "now" at the right edge is dropped.
+        const lbl = i === n - 1 ? "now" : i % every === 0 && i < n - 1 - every * 1.2 ? dTime.format((t0 + i * step) * 1000) : "";
         return `<span class="tl__day tl__day--min" data-zone="${v == null ? "none" : "hr"}" style="--h:${v == null ? 6 : 12 + ((v - lo) / (hi - lo)) * 88}%"
           ${v ? `title="${dTime.format((t0 + i * step) * 1000)} · ${Math.round(v)} bpm"` : ""}><span class="tl__bar"></span><span class="tl__lbl">${lbl}</span></span>`;
       }).join("");
@@ -331,17 +335,16 @@
   let anchorsPx = {};
   function layoutCallouts() {
     for (const c of CALLOUTS) {
-      c.node.style.left = c.side === "left" ? `${c.x * 100}%` : "";
-      c.node.style.right = c.side === "right" ? `${(1 - c.x - 0.22) * 100}%` : "";
+      c.node.style.left = c.side === "left" ? "var(--hv-inset)" : "";
+      c.node.style.right = c.side === "right" ? "var(--hv-inset)" : "";
       c.node.style.top = `${c.y * 100}%`;
     }
     const sr = stage.getBoundingClientRect();
     for (const c of CALLOUTS) {
-      const lr = c.node.querySelector(".co__label")?.getBoundingClientRect();
-      if (!lr) continue;
-      c.start = c.side === "right"
-        ? [lr.left - sr.left - 14, lr.bottom - sr.top + 6]
-        : [lr.right - sr.left + 14, lr.bottom - sr.top + 6];
+      const nr = c.node.querySelector(".co__num")?.getBoundingClientRect();
+      if (!nr) continue;
+      const box = c.node.getBoundingClientRect(), y = (nr.top + nr.bottom) / 2 - sr.top;
+      c.start = c.side === "right" ? [box.left - sr.left - 12, y] : [box.right - sr.left + 12, y];
     }
   }
 
@@ -351,7 +354,7 @@
     let [x, y, z] = p;
     z += ex;
     const x1 = x * cy - y * sy, y1 = x * sy + y * cy;              // yaw around z
-    const tilt = -0.3, ct = Math.cos(tilt), st = Math.sin(tilt);   // roll in screen plane
+    const tilt = -0.14, ct = Math.cos(tilt), st = Math.sin(tilt);   // roll in screen plane
     const x2 = x1 * ct - z * st, z2 = x1 * st + z * ct;
     const pitch = 0.18, cp = Math.cos(pitch), sp = Math.sin(pitch); // look slightly from above
     const y3 = y1 * cp - z2 * sp, z3 = y1 * sp + z2 * cp;
@@ -365,12 +368,21 @@
     const env = envelope(now);
     const target = mode === "exploded" ? 1 : 0;
     explode += (target - explode) * (reduce.matches ? 1 : 0.08);
-    if (spin && !dragging) yaw += 0.0032;
+    // The surface is thin front to back, so a full turn shows it edge-on, where it reads as a flat egg.
+    // Instead it rocks gently around the front view, and eases back to the front after a drag.
+    if (spin && !dragging && Math.abs(vel) < 0.002) {
+      const front = Math.round(yaw / (Math.PI * 2)) * Math.PI * 2;
+      phase += 0.006;
+      yaw += (front - yaw) * 0.015 + 0.45 * 0.006 * Math.cos(phase);
+    }
     if (!dragging && Math.abs(vel) > 0.0001) { yaw += vel; vel *= 0.94; }
 
     const narrow = W < 760;
-    const cx = W * (narrow ? 0.5 : 0.47), cy0 = H * (narrow ? 0.33 : 0.47);
-    const S = (narrow ? Math.min(W * 0.3, H * 0.16) : Math.min(W * 0.19, H * 0.235)) * (1 + (reduce.matches ? 0 : 0.045 * env)) * (1 - 0.12 * explode);
+    const cx = W * 0.5;
+    const S0 = narrow ? Math.min(W * 0.135, 52) : Math.min(W * 0.1, H * 0.13);
+    // On phones the heart sits in the slot under the header (the callouts leave 170px for it).
+    const cy0 = narrow ? head.offsetTop + head.offsetHeight + 24 + S0 * 1.45 : H * 0.46;
+    const S = S0 * (1 + (reduce.matches ? 0 : 0.045 * env)) * (1 - 0.12 * explode);
     const cyw = Math.cos(yaw), syw = Math.sin(yaw);
     const proj = (p, i) => {
       const ex = (bandOf(i) - (BANDS - 1) / 2) * 0.38 * explode;
@@ -385,7 +397,7 @@
     // Inner glow, flares on each contraction.
     const gR = S * 1.25;
     const g = ctx.createRadialGradient(cx, cy0, 0, cx, cy0, gR);
-    const gi = 0.16 + 0.22 * env;
+    const gi = 0.05 + 0.09 * env;
     g.addColorStop(0, `rgba(${glowRGB},${gi})`);
     g.addColorStop(0.55, `rgba(${glowRGB},${gi * 0.35})`);
     g.addColorStop(1, `rgba(${glowRGB},0)`);
@@ -459,8 +471,8 @@
       const halo = c.g.querySelector(".ld__halo"), core = c.g.querySelector(".ld__core");
       halo.setAttribute("cx", px); halo.setAttribute("cy", py);
       core.setAttribute("cx", px); core.setAttribute("cy", py);
-      halo.setAttribute("r", 11 + 6 * env);
-      halo.style.opacity = 0.35 + 0.45 * env;
+      halo.setAttribute("r", 6 + 5 * env);
+      halo.style.opacity = 0.12 + 0.3 * env;
     }
 
     drawECG(now);
@@ -484,11 +496,10 @@
     ectx.setTransform(1, 0, 0, 1, 0, 0);
     ectx.clearRect(0, 0, w, h);
     const span = 3200; // ms shown
-    const color = liveNow ? lime : `rgba(${ink},0.5)`;
-    ectx.lineWidth = 1.6 * DPR;
+    const color = liveNow ? lime : `rgba(${ink},0.35)`;
+    ectx.lineWidth = 1.25 * DPR;
     ectx.lineJoin = "round";
     ectx.strokeStyle = color;
-    if (liveNow) { ectx.shadowColor = color; ectx.shadowBlur = 8 * DPR; }
     ectx.beginPath();
     const base = h * 0.66, amp = h * 0.55;
     for (let x = 0; x <= w; x += 2) {
@@ -502,43 +513,6 @@
     const y = base - wave(now) * amp;
     ectx.fillStyle = color;
     ectx.beginPath(); ectx.arc(w - 3 * DPR, y, 3 * DPR, 0, Math.PI * 2); ectx.fill();
-  }
-
-  /* ───────── Side cards: wireframe globes ───────── */
-  const globe = $("#hv-globe"), onion = $("#hv-onion");
-  const gctx = globe.getContext("2d"), octx = onion.getContext("2d");
-  function sizeGlobes() {
-    for (const c of [globe, onion]) {
-      const r = c.getBoundingClientRect();
-      c.width = r.width * DPR; c.height = r.height * DPR;
-    }
-  }
-  function drawGlobe(c, x, t, opts) {
-    const w = c.width, h = c.height;
-    if (!w) return;
-    x.setTransform(1, 0, 0, 1, 0, 0);
-    x.clearRect(0, 0, w, h);
-    const R = Math.min(w * opts.rx, h * opts.ry), cx = w * opts.cx, cy = h * opts.cy;
-    x.strokeStyle = "rgba(255,255,255,0.55)";
-    x.lineWidth = 1 * DPR;
-    for (let k = 0; k < opts.n; k++) {
-      const a = (k / opts.n) * Math.PI + t * 0.0004;
-      const rx = Math.abs(Math.cos(a)) * R * opts.squash + 0.5;
-      x.beginPath();
-      if (opts.pinch) { // onion: pointed top
-        x.moveTo(cx, cy - R);
-        x.bezierCurveTo(cx + rx * 1.5, cy - R * 0.2, cx + rx * 1.2, cy + R, cx, cy + R);
-        x.bezierCurveTo(cx - rx * 1.2, cy + R, cx - rx * 1.5, cy - R * 0.2, cx, cy - R);
-      } else x.ellipse(cx, cy, rx, R, 0, 0, Math.PI * 2);
-      x.stroke();
-    }
-    if (opts.lobes) {
-      for (const s of [-1, 1]) { x.beginPath(); x.ellipse(cx, cy + s * R * 0.5, R * 0.98, R * 0.5, 0, 0, Math.PI * 2); x.stroke(); }
-    }
-    x.fillStyle = lime;
-    x.shadowColor = lime; x.shadowBlur = 12 * DPR;
-    x.beginPath(); x.arc(opts.dotX ? cx + R * opts.dotX : cx, cy + (opts.dotY || 0) * R, 4.5 * DPR, 0, Math.PI * 2); x.fill();
-    x.shadowBlur = 0;
   }
 
   /* ───────── Interaction ───────── */
@@ -566,6 +540,7 @@
   spinBtn.setAttribute("aria-pressed", String(spin));
   spinBtn.addEventListener("click", () => { spin = !spin; spinBtn.setAttribute("aria-pressed", String(spin)); });
   $("#hv-theme").addEventListener("click", () => $("#theme-toggle").click());
+  $(".side__theme")?.addEventListener("click", () => $("#theme-toggle").click());
   const fullBtn = $("#hv-full");
   fullBtn.addEventListener("click", () => {
     if (document.fullscreenElement) document.exitFullscreen();
@@ -586,8 +561,6 @@
     tickBeats(now);
     if (document.body.dataset.view === "heart" && !document.hidden) {
       draw(now);
-      drawGlobe(globe, gctx, now, { n: 9, rx: 0.34, ry: 0.3, cx: 0.6, cy: 0.62, squash: 1, lobes: true, dotX: 1 });
-      drawGlobe(onion, octx, now, { n: 7, rx: 0.26, ry: 0.32, cx: 0.72, cy: 0.64, squash: 0.55, pinch: true, dotY: 0.25 });
     }
     requestAnimationFrame(frame);
   }

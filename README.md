@@ -25,12 +25,16 @@ stays on your machine.
 cd whoop-tools
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python whoop.py selftest        # prove the protocol frame builder
-.venv/bin/python live.py                  # live HR (wear the strap); Ctrl-C to stop
+.venv/bin/python daemon.py                # hold the strap while it's nearby: drain + live HR; Ctrl-C to stop
 # official API: copy .env.example -> .env, add dev-app creds, then:
 .venv/bin/python whoop_api.py login && .venv/bin/python whoop_api.py sync
 .venv/bin/python dashboard.py             # http://localhost:8787
 ```
-Full setup, backups, and the hourly background service are in **`whoop-tools/README.md`**.
+Full setup, backups, and the always-on background service are in **`whoop-tools/README.md`**.
+
+The strap records one sample a second on its own. `daemon.py` connects whenever the strap
+is near the laptop, collects what it stored while you were away, and streams live in
+between, so the heart-rate record has no gaps even though the laptop is not always there.
 
 ## Preview with demo data (fill-in template)
 This repo ships **synthetic demo data only** — a fictional "Demo User", no real person's
@@ -54,7 +58,7 @@ A local, offline app (`whoop-tools/static/`, vendored Chart.js, light/dark theme
 - **Archive**: WHOOP cloud history behind a calendar. Every page is labelled with the day
   you're viewing: recovery, vitals, trends, sleep, activity and workouts for that day.
 - **Device**: strap battery, stored record counts, decoded firmware log, and a **Resync**
-  button that runs one collector cycle.
+  button that runs one collector cycle (or asks the running daemon to drain now).
 
 Screenshots below use the synthetic demo data:
 
@@ -71,17 +75,21 @@ Setup, protocol, data model, dashboard, troubleshooting and the optional Cloudfl
 are in `skills/reverse-engineer-whoop/resources/`.
 
 ## What's here
-- `whoop-tools/` — the working system (BLE protocol, live stream, API sync, decode,
+- `whoop-tools/` — the working system (BLE protocol, always-on daemon, API sync, decode,
   dashboard, encrypted backups, Cloudflare D1 sync, launchd services).
+- `whoop-tools/templates/` + `import_data.py` — **device adapter**: no WHOOP 4.0? Fill the
+  CSV templates from any wearable's export (Oura, Garmin, Apple Health, Fitbit…) and import
+  them into the same dashboard. Mapping guide + agent prompt in `templates/README.md`.
 - `skills/reverse-engineer-whoop/` — a portable skill + `resources/PROTOCOL.md`
   (verified protocol + command table) and `resources/WALKTHROUGH.md` (the end-to-end path).
 
 ## Architecture
 ```
- WHOOP 4.0 strap ──BLE──►  whoop.py / live.py / collector.py ─┐
+ WHOOP 4.0 strap ──BLE──►  whoop.py / daemon.py ───────────────┐
  WHOOP API (OAuth) ──────►  whoop_api.py ─────────────────────┤──►  SQLite (whoop.db)
                                                               │        │
                                       decode.py (raw→tables) ─┘        ├─► dashboard.py (localhost)
                                                                        ├─► backup.py (encrypted local)
-                                                                       └─► cloud_sync.py (Cloudflare D1)
+                                                                       ├─► cloud_sync.py (Cloudflare D1)
+                                                                       └─► archive.py (raw frames → Cloudflare R2, then removed locally)
 ```

@@ -2,10 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111111" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fcfcfc" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vitals">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
 <meta name="color-scheme" content="dark light">
 <title>Vitals · WHOOP local</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230b0d10'/%3E%3Cpath d='M5 17h5l3-7 4 13 3-9 2 3h5' fill='none' stroke='%2341e2b8' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="/static/favicon.png">
 <script>
   // Apply the saved theme before first paint so there is no flash.
   (function () {
@@ -13,8 +21,11 @@
     var t = q;
     try { t = t || localStorage.getItem("vitals-theme"); } catch (e) {}
     if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    if (new URLSearchParams(location.search).get("grid")) document.documentElement.dataset.grid = "1"; // show the 8px layout grid
   })();
 </script>
+<link rel="preload" href="/static/inter-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/inter-500.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/chart.umd.js" defer></script>
 <script src="/static/app.js" defer></script>
@@ -27,10 +38,20 @@
   <!-- ───────── Sidebar ───────── -->
   <aside class="side" aria-label="App">
     <a class="brand" href="#heart" aria-label="Vitals, back to overview">
-      <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9"/><path d="M5 17h5l3-7 4 13 3-9 2 3h5"/></svg>
-      <span class="brand__name">Vitals</span>
-      <span class="brand__tag">Local</span>
+      <img class="brand__mark" src="/static/smiley.png" alt="" width="28" height="28">
+      <span class="brand__text"><span class="brand__name">Vitals</span><span class="brand__tag">Local</span></span>
     </a>
+    <div class="period side__period" role="group" aria-label="Time period">
+      <a class="period__btn" href="#today" data-period-btn="today"><span class="period__live" aria-hidden="true"></span>Today</a>
+      <button class="period__btn" type="button" data-cal data-period-btn="archive" aria-haspopup="dialog"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg><span data-archive-label>Archive</span></button>
+    </div>
+    <div class="side__tools">
+    <button class="side__sync" type="button" data-resync aria-label="Resync strap"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg></button>
+    <button class="side__theme" type="button" aria-label="Switch theme">
+      <svg class="i-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.5"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M4 4l1.4 1.4M14.6 14.6 16 16M4 16l1.4-1.4M14.6 5.4 16 4"/></svg>
+      <svg class="i-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7Z"/></svg>
+    </button>
+    </div>
 
     <div class="patient">
       <span class="patient__avatar" id="avatar" aria-hidden="true">·</span>
@@ -61,6 +82,7 @@
         <button class="resync" type="button" data-resync><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg><span data-resync-label>Resync strap</span></button>
         <p class="sync-msg" data-sync-msg aria-live="polite"></p>
       </div>
+      <a class="side__signout" href="/logout" hidden data-cloud-only>Sign out</a>
       <p class="side__note"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="9" width="12" height="8.5" rx="2"/><path d="M6.5 9V6.5a3.5 3.5 0 0 1 7 0V9"/></svg>All data stays on this Mac</p>
     </div>
   </aside>
@@ -71,7 +93,7 @@
       <div class="hv__stage" id="hv-stage">
         <header class="hv__head">
           <p class="hv__eyebrow" id="hv-eyebrow">Today</p>
-          <h1 class="hv__title" id="hv-title">Heart &amp;<br>Circulation</h1>
+          <h1 class="hv__title" id="hv-title">Heart</h1>
           <div class="hv__period"><div class="period" role="group" aria-label="Time period">
             <a class="period__btn" href="#today" data-period-btn="today"><span class="period__live" aria-hidden="true"></span>Today</a>
             <button class="period__btn" type="button" data-cal data-period-btn="archive" aria-haspopup="dialog"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg><span data-archive-label>Archive</span></button>
@@ -99,26 +121,24 @@
         <div class="hv__pulse">
           <div class="hv__pulse-head"><span class="hv__pulse-dot" id="hv-pulse-dot"></span><span id="hv-pulse-state">Offline</span><span class="hv__pulse-meta" id="hv-pulse-meta"></span></div>
           <canvas id="hv-ecg" aria-hidden="true"></canvas>
-          <p class="hv__pulse-note">Waveform synthesized from strap beat timing (HR / RR), not an ECG.</p>
+          <p class="hv__pulse-note">Drawn from beat timing, not an ECG.</p>
         </div>
 
         <div class="hv__timeline" id="hv-timeline" role="listbox" aria-label="Choose a day" tabindex="0"></div>
         <p class="hv__drag-hint" aria-hidden="true">Drag to rotate</p>
       </div>
 
-      <aside class="hv__side">
+      <aside class="hv__side" aria-label="Summary">
         <article class="hv-card hv-card--rec" id="hv-rec" data-zone="none">
           <p class="hv-card__label">Recovery</p>
-          <p class="hv-card__num"><span id="hv-rec-num">—</span><small>%</small></p>
+          <p class="hv-card__num"><span id="hv-rec-num">—</span></p>
           <p class="hv-card__sub" id="hv-rec-sub">&nbsp;</p>
-          <canvas class="hv-card__globe" id="hv-globe" aria-hidden="true"></canvas>
           <p class="hv-card__foot"><span class="hv-dot"></span><span id="hv-rec-zone">No score</span></p>
         </article>
         <article class="hv-card hv-card--count">
           <p class="hv-card__label">Measurements</p>
           <p class="hv-card__num hv-card__num--sm" id="hv-count">—</p>
           <p class="hv-card__sub">records stored on this Mac</p>
-          <canvas class="hv-card__onion" id="hv-onion" aria-hidden="true"></canvas>
         </article>
       </aside>
     </section>
@@ -170,9 +190,8 @@
               </header>
               <div class="monitor__body">
                 <div class="monitor__readout">
-                  <p class="mlabel">HR <span>bpm</span></p>
                   <div class="bpm">
-                    <span class="bpm__num" id="live-hr">—</span>
+                    <span class="bpm__num" id="live-hr">—</span><span class="bpm__unit">bpm</span>
                     <span class="bpm__limits" aria-label="Display limits 40 to 180 bpm"><span>180</span><span>40</span></span>
                   </div>
                   <p class="monitor__note" id="live-note">Waiting for the strap</p>
@@ -471,6 +490,12 @@
     </footer>
   </div>
 </div>
+<nav class="tabbar" aria-label="Views">
+  <a href="#heart" data-tab="heart"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7-4.4-8.7-8.8C2 8 3.8 4.8 7 4.8c1.9 0 3.2 1 4 2.2h2c.8-1.2 2.1-2.2 4-2.2 3.2 0 5 3.2 3.7 6.4C19 15.6 12 20 12 20Z"/></svg><span>Heart</span></a>
+  <a href="#today" data-tab="today"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span>Today</span></a>
+  <a href="#overview" data-tab="archive"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg><span>Archive</span></a>
+  <a href="#device" data-tab="device"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="3" width="10" height="18" rx="3.5"/><path d="M10 12h4"/></svg><span>Device</span></a>
+</nav>
 <div class="cal" id="cal" role="dialog" aria-label="Choose a date" hidden></div>
 </body>
 </html>

@@ -4,12 +4,13 @@
 - Timestamped SQLite snapshot (consistent copy via the online backup API)
 - JSON export of every table
 - CSV export of the key health tables
-Keeps the last 30 snapshots (all files of older ones are pruned). Run standalone or from the collector.
+Keeps the last 30 snapshots (7 when the daemon takes one a day); older ones are pruned.
+Run standalone, from the collector, or from the daemon.
 """
 import sqlite3, os, json, csv, time, glob, re, subprocess, sys, datetime as dt
 import db
 
-HERE = os.path.dirname(__file__)
+HERE = os.path.dirname(os.path.abspath(__file__))
 BK = os.path.join(HERE, "backups")
 KEY = os.path.join(HERE, ".backup_key")
 os.makedirs(BK, exist_ok=True)
@@ -41,17 +42,17 @@ def prune(keep=30):
             os.remove(p)
 
 TABLES = ["api_sleep", "api_recovery", "api_cycle", "api_workout",
-          "api_profile", "ble_hr", "ble_raw", "sync_state"]
+          "api_profile", "ble_hr", "ble_raw", "clock_sync", "raw_archive", "daily_night", "sync_state"]
 
-def snapshot():
+def snapshot(keep=30):
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     src = db.connect()
     # consistent .db copy
     dst_path = os.path.join(BK, f"whoop-{stamp}.db")
     dst = sqlite3.connect(dst_path)
     src.backup(dst); dst.close()
-    # JSON (all tables)
-    data = {t: [dict(r) for r in src.execute(f"SELECT * FROM {t}").fetchall()] for t in TABLES}
+    # JSON (all tables except the bulky raw frames, which the .db snapshot already holds)
+    data = {t: [dict(r) for r in src.execute(f"SELECT * FROM {t}").fetchall()] for t in TABLES if t != "ble_raw"}
     json_path = os.path.join(BK, f"whoop-{stamp}.json")
     json.dump(data, open(json_path, "w"), indent=1)
     # CSV (health tables)
@@ -67,8 +68,8 @@ def snapshot():
         json_path = _encrypt(json_path)
         for f in glob.glob(os.path.join(BK, f"*-{stamp}.csv")):
             _encrypt(f)
-    # prune to last 30 db snapshots (encrypted or not)
-    prune(30)
+    # prune to the newest `keep` snapshots (encrypted or not)
+    prune(keep)
     sizes = sum(os.path.getsize(p) for p in glob.glob(os.path.join(BK, "*")))
     tag = "encrypted" if enc else "plaintext"
     print(f"backup {stamp} ({tag}): {sum(len(v) for v in data.values())} rows -> {dst_path}")

@@ -156,6 +156,15 @@ Full detail in `resources/PROTOCOL.md`.
 - Show data age honestly. Strap data is "today"; API data is a dated archive.
 - When something fails, check `resources/TROUBLESHOOTING.md` before improvising.
 
+## User has a different device, or no strap
+
+Skip the Bluetooth phases and use the device adapter. Convert their export into
+`whoop-tools/templates/daily.csv`, `workouts.csv` and `heart_rate.csv` following
+`templates/README.md` (column units, plus Oura, Garmin, Apple Health and Fitbit mappings).
+Then run `import_data.py --dir my_data --dry-run`, fix the rows it skips, import for real,
+and start `dashboard.py`. Their filled CSVs and `whoop.db` stay out of git; `.gitignore`
+already handles that.
+
 ## Resources
 
 | File | What it covers |
@@ -168,4 +177,5 @@ Full detail in `resources/PROTOCOL.md`.
 | `resources/CLOUDFLARE.md` | Optional Cloudflare D1 off-site backup |
 | `resources/WALKTHROUGH.md` | How the original build went, as prompts you can reuse |
 | `scripts/doctor.py` | Read-only preflight and progress check |
+| `../../whoop-tools/templates/README.md` | Device adapter: load any wearable's export into the dashboard |
 | `images/` | Screenshots of the dashboard with synthetic demo data |

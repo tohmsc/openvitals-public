@@ -185,13 +185,8 @@
     },
   };
   // Vertical gradient for bars: solid at the top, fading toward the baseline.
-  const vgrad = (color, from = 1, to = 0.55) => (ctx) => {
-    const a = ctx.chart.chartArea;
-    if (!a) return color;
-    const g = ctx.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom);
-    g.addColorStop(0, alpha(color, from)); g.addColorStop(1, alpha(color, to));
-    return g;
-  };
+  // Flat fills: one solid tone per bar, like the rest of the interface.
+  const vgrad = (color) => () => alpha(color, 0.85);
   // Monitor colors are theme-independent (bedside display is always dark).
   const MON = { trace: "#3df5b0", dim: "rgba(200,255,232,0.45)", bg: "#07090a" };
 
@@ -204,7 +199,7 @@
 
   function baseOptions({ y = {}, stacked = false, tooltip = {}, plugins = {}, xTicks = 6 } = {}) {
     const t = theme();
-    const font = { family: getComputedStyle(document.body).fontFamily, size: 11.5 };
+    const font = { family: getComputedStyle(document.body).fontFamily, size: 11 };
     return {
       responsive: true,
       maintainAspectRatio: false,
@@ -214,10 +209,10 @@
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: t.surface3, borderColor: t.border, borderWidth: 1,
+          backgroundColor: t.surface, borderColor: t.border, borderWidth: 1,
           titleColor: t.text, bodyColor: t.text2, footerColor: t.text,
-          titleFont: { ...font, size: 12, weight: "600" }, bodyFont: { ...font, size: 12 }, footerFont: { ...font, size: 12, weight: "600" },
-          padding: 10, cornerRadius: 8, caretSize: 0, boxWidth: 8, boxHeight: 8, boxPadding: 4,
+          titleFont: { ...font, size: 12, weight: "500" }, bodyFont: { ...font, size: 12 }, footerFont: { ...font, size: 12, weight: "500" },
+          padding: 10, cornerRadius: 6, caretSize: 0, boxWidth: 8, boxHeight: 8, boxPadding: 4,
           usePointStyle: true, displayColors: true,
           ...tooltip,
         },
@@ -258,13 +253,20 @@
   const themeBtn = $("#theme-toggle");
   const currentTheme = () => root.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
   function syncThemeButton() {
-    themeBtn.setAttribute("aria-label", currentTheme() === "dark" ? "Switch to light theme" : "Switch to dark theme");
+    const label = currentTheme() === "dark" ? "Switch to light theme" : "Switch to dark theme";
+    for (const b of document.querySelectorAll("#theme-toggle, #hv-theme, .side__theme")) b.setAttribute("aria-label", label);
   }
   if (!root.dataset.theme && matchMedia("(prefers-color-scheme: light)").matches) root.dataset.theme = "light";
   syncThemeButton();
   themeBtn.addEventListener("click", () => {
     const next = currentTheme() === "dark" ? "light" : "dark";
+    // Swap the theme with every transition off, so colors don't all animate at once and smear.
+    const off = document.createElement("style");
+    off.textContent = "*,*::before,*::after{transition:none!important}";
+    document.head.append(off);
     root.dataset.theme = next;
+    getComputedStyle(root).color; // flush styles before transitions come back
+    requestAnimationFrame(() => requestAnimationFrame(() => off.remove()));
     try { localStorage.setItem("vitals-theme", next); } catch { /* private mode */ }
     syncThemeButton();
     if (DATA) renderAll();
@@ -288,6 +290,8 @@
     const parts = [];
     if (d.sync?.ble) parts.push(`Strap ${ago(d.sync.ble * 1000)}`);
 
+    if (d.cloud && d.sync?.cloud) parts.push(`Mac pushed ${ago(d.sync.cloud * 1000)}`);
+    document.querySelectorAll("[data-cloud-only]").forEach((n) => { n.hidden = !d.cloud; });
     $("#sync-text").textContent = parts.join(" · ") || "Not synced yet";
     const chip = $("#sync-status");
     chip.toggleAttribute("data-stale", !d.sync?.ble || Date.now() - d.sync.ble * 1000 > 6 * 36e5);
@@ -386,10 +390,11 @@
       if (b && latest != null) {
         const z = b.sd ? (latest - b.mean) / b.sd : 0;
         const f = z > 1 ? "up" : z < -1 ? "down" : "info";
-        word = f === "up" ? "Above usual range" : f === "down" ? "Below usual range" : "Within usual range";
+        word = f === "up" ? "Above usual" : f === "down" ? "Below usual" : "Usual";
         const pct = ((latest - b.mean) / b.mean) * 100;
         const sign = pct > 0 ? "+" : pct < 0 ? "−" : "±";
-        flag = `<span class="vital__flag" data-zone="${f}" title="${word}"><span class="status__icon" aria-hidden="true"></span><span class="sr-only">${word}</span></span>`;
+        // The state is written out, not carried by the dot's color alone.
+        flag = `<span class="vital__flag" data-zone="${f}"><span class="status__icon" aria-hidden="true"></span>${word}</span>`;
         delta = `<p class="vital__delta" data-zone="${f}"><b>${sign}${n1.format(Math.abs(pct))}%</b> vs avg ${fmt(b.mean, m.d)} ${m.unit}</p>`;
       }
       card.innerHTML = `
@@ -662,7 +667,8 @@
   const TAG = { SUPERVISOR: "#f4b740", BLE: "#6cb8ff", SENSOR: "#3df5b0", STORAGE: "#a08fff", HR: "#ff7a90" };
   function renderDevice(d) {
     const soc = d.soc || [];
-    const last = soc.at(-1);
+    // the latest reading as decode.py recorded it (the series is in arrival order)
+    const last = d.battery != null ? { soc_pct: d.battery } : soc.at(-1);
     const bat = $("#battery");
     if (last) {
       const z = last.soc_pct < 15 ? "low" : last.soc_pct < 30 ? "fair" : "good";
@@ -680,7 +686,7 @@
         o.plugins.tooltip.displayColors = false;
         mount("c-soc", {
           type: "line",
-          data: { labels: soc.map((s) => s.rtc), datasets: [{ data: soc.map((s) => s.soc_pct), borderColor: color, borderWidth: 1.75, stepped: false, tension: 0.2, pointRadius: 0, pointHoverRadius: 4, fill: true, backgroundColor: (ctx) => {
+          data: { labels: soc.map((_, i) => i), datasets: [{ data: soc.map((s) => s.soc_pct), borderColor: color, borderWidth: 1.75, stepped: false, tension: 0.2, pointRadius: 0, pointHoverRadius: 4, fill: true, backgroundColor: (ctx) => {
             const a = ctx.chart.chartArea; if (!a) return "transparent";
             const g = ctx.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom); g.addColorStop(0, alpha(color, 0.25)); g.addColorStop(1, alpha(color, 0)); return g;
           } }] },
@@ -689,7 +695,7 @@
         }).canvas.setAttribute("aria-label", `Battery level across ${soc.length} firmware reports, latest ${fmt(last.soc_pct)} percent.`);
       }
     } else {
-      bat.innerHTML = `<div class="empty"><div><strong>No battery reports</strong>Run collector.py with the strap nearby.</div></div>`;
+      bat.innerHTML = `<div class="empty"><div><strong>No battery reports</strong>Run daemon.py with the strap nearby.</div></div>`;
       emptyState("c-soc", "", "");
     }
 
@@ -721,14 +727,14 @@
     const lastTs = L?.ts ? L.ts * 1000 : recent.at(-1)?.ts * 1000;
     $("#live-note").textContent = live
       ? "Streaming from the strap"
-      : lastTs ? `Last reading ${ago(lastTs)}. Run live.py to stream.` : "No readings yet. Run live.py with the strap nearby.";
+      : lastTs ? `Last reading ${ago(lastTs)}.${DATA?.cloud ? " Synced from your Mac." : " Run daemon.py to stream."}` : DATA?.cloud ? "No readings synced yet." : "No readings yet. Run daemon.py with the strap nearby.";
     const rr = L?.rr_ms?.[0];
     $("#live-rr").textContent = live && rr ? `${fmt(rr)} ms` : "—";
     const hrs = recent.map((r) => r.hr);
     $("#live-range").textContent = hrs.length ? `${Math.min(...hrs)} / ${Math.max(...hrs)} bpm` : "—";
     $("#live-avg").textContent = hrs.length ? `${fmt(mean(hrs))} bpm` : "—";
 
-    const color = MON.trace;
+    const color = tok("--m-hr-ui");
     const data = recent.map((r) => r.hr);
     const labels = recent.map((r) => dTime.format(r.ts * 1000));
     let c = charts.get("c-live");
@@ -739,20 +745,18 @@
       c.options.plugins.head.color = live ? color : null;
       c.update("none");
     } else {
-      const o = baseOptions({ y: { grace: "18%", ticks: { ...baseOptions().scales.y.ticks, maxTicksLimit: 4, color: MON.dim, font: { family: "ui-monospace, SF Mono, Menlo, monospace", size: 10.5 } } }, plugins: { glow: { color: alpha(color, 0.7), blur: 12 }, head: { color: live ? color : null } } });
+      const o = baseOptions({ y: { grace: "18%", ticks: { ...baseOptions().scales.y.ticks, maxTicksLimit: 4 } }, plugins: { glow: { color: "transparent", blur: 0 }, head: { color: live ? color : null } } });
       o.scales.x.display = false;
-      o.scales.y.grid.display = false;
-      Object.assign(o.plugins.tooltip, { backgroundColor: "#0d1412", borderColor: "rgba(61,245,176,0.25)", titleColor: "#e8fff6", bodyColor: "#bff5df" });
       o.animation = false;
       o.layout.padding = { top: 12, bottom: 6, left: 6, right: 0 };
       o.plugins.tooltip.callbacks = { label: (i) => ` ${i.parsed.y} bpm` };
       o.plugins.tooltip.displayColors = false;
       c = mount("c-live", {
         type: "line",
-        data: { labels, datasets: [{ data, borderColor: live ? color : alpha(color, 0.55), borderWidth: 2, tension: 0.35, pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color, pointHoverBorderColor: MON.bg, pointHoverBorderWidth: 2, fill: true,
+        data: { labels, datasets: [{ data, borderColor: live ? color : alpha(color, 0.55), borderWidth: 1.5, tension: 0.35, pointRadius: 0, pointHoverRadius: 4, pointHoverBackgroundColor: color, pointHoverBorderColor: tok("--surface"), pointHoverBorderWidth: 2, fill: true,
           backgroundColor: (ctx) => {
             const a = ctx.chart.chartArea; if (!a) return "transparent";
-            const g = ctx.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom); g.addColorStop(0, alpha(color, 0.2)); g.addColorStop(1, alpha(color, 0)); return g;
+            const g = ctx.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom); g.addColorStop(0, alpha(color, 0.12)); g.addColorStop(1, alpha(color, 0)); return g;
           } }] },
         options: o,
         plugins: [glow, head],
@@ -801,6 +805,8 @@
   const onScroll = () => topbar.toggleAttribute("data-scrolled", scrollY > 8);
   addEventListener("scroll", onScroll, { passive: true });
 
+  const summaryUrl = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return `/api/summary?since=${Math.floor(+d / 1000)}`; };
+
   /* ───────── Period: Today (strap) vs Archive (WHOOP cloud) ───────── */
   const dFull = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" });
   const dDayFull = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
@@ -845,12 +851,20 @@
       document.querySelectorAll("[data-archive-range]").forEach((n) => { n.textContent = `${new Date(a.start).getFullYear()}–${String(new Date(a.end).getFullYear()).slice(2)}`; });
     }
     dispatchEvent(new CustomEvent("vitals:period", { detail: { period: PERIOD, date: ADATE } }));
+    syncTabs();
   }
+  function syncTabs() {
+    const view = document.body.dataset.view;
+    const tab = view === "heart" ? "heart" : location.hash === "#device" ? "device" : PERIOD === "archive" ? "archive" : "today";
+    document.querySelectorAll("[data-tab]").forEach((a) => a.toggleAttribute("aria-current", a.dataset.tab === tab));
+    document.querySelectorAll("[data-tab][aria-current]").forEach((a) => a.setAttribute("aria-current", "page"));
+  }
+  addEventListener("hashchange", () => requestAnimationFrame(syncTabs));
   const ARCHIVE_HASHES = ["#overview", "#trends", "#sleep", "#activity"];
   function routePeriod() {
     const h = location.hash;
     if (ARCHIVE_HASHES.includes(h)) setPeriod("archive");
-    else if (h === "#today") setPeriod("today");
+    else if (h === "#today" || h === "#device") setPeriod("today");
   }
   addEventListener("hashchange", routePeriod);
   document.addEventListener("click", (e) => {
@@ -874,9 +888,21 @@
       }
     }
     const hrs = S.map((r) => r.hr);
-    const rmssd = diffs.length >= 10 ? Math.sqrt(diffs.reduce((a, b) => a + b * b, 0) / diffs.length) : null;
+    // HRV comes from the server (metrics.py): it drops beat intervals that don't fit the heart
+    // rate, and it is the same number the Telegram message uses.
+    const sv = d.today;
+    const rmssd = sv ? sv.rmssd : diffs.length >= 30 ? Math.sqrt(diffs.reduce((a, b) => a + b * b, 0) / diffs.length) : null;
     return { samples: S, first: S[0].ts * 1000, last: S.at(-1).ts * 1000, activeMs: active * 1000,
-      avg: mean(hrs), min: Math.min(...hrs), max: Math.max(...hrs), rmssd, nRR: diffs.length };
+      avg: mean(hrs), min: Math.min(...hrs), max: Math.max(...hrs), rmssd, nRR: sv ? sv.n_rr ?? 0 : diffs.length };
+  }
+  // Your usual: learned from your own strap nights once there are enough (learn.py);
+  // until then the WHOOP archive, labelled with its year so it isn't mistaken for now.
+  function usualBaseline(d) {
+    const u = d.personal?.usual;
+    if (u?.source !== "own") return { ...archiveBaseline(d), own: false };
+    return { own: true, nights: u.nights, avgHr: null,
+      rhr: { mean: u.rhr, sd: u.rhr_spread, n: u.nights },
+      hrv: u.hrv ? { mean: u.hrv, sd: u.hrv * u.hrv_spread, n: u.nights } : null };
   }
   function archiveBaseline(d) {
     const r = d.recovery.slice(0, 30), c = d.cycle.filter((x) => x.end && x.avg_hr).slice(0, 30);
@@ -892,14 +918,40 @@
     return `<div class="ref" style="--c:var(${colorVar})" aria-hidden="true">
       <span class="ref__band" style="left:${pos(b.mean - sdv)}%;width:${pos(b.mean + sdv) - pos(b.mean - sdv)}%"></span>
       <span class="ref__mark" style="left:${pos(v)}%"></span></div>
-      <div class="ref__ends" aria-hidden="true"><span>${fmt(lo, d)}</span><span>archive usual ${fmt(b.mean - sdv, d)}–${fmt(b.mean + sdv, d)}${unit}</span><span>${fmt(hi, d)}</span></div>`;
+      <div class="ref__ends" aria-hidden="true"><span>${fmt(lo, d)}</span><span>${b.own ? "your" : "archive"} usual ${fmt(b.mean - sdv, d)}–${fmt(b.mean + sdv, d)}${unit}</span><span>${fmt(hi, d)}</span></div>`;
   }
+  // What learn.py knows about you, and three buttons to tell it how you feel today.
+  function learnedBlock(d) {
+    const p = d.personal;
+    if (!p) return "";
+    const feels = [["good", "Good"], ["ok", "OK"], ["rough", "Rough"]];
+    return `<div class="learned">
+      <p class="learned__q" id="feel-q">How do you feel today?</p>
+      <div class="learned__feel" role="group" aria-labelledby="feel-q">
+        ${feels.map(([k, label]) => `<button type="button" class="btn" data-feel="${k}" aria-pressed="${p.feel === k}">${label}</button>`).join("")}
+      </div>
+      <ul class="learned__list">${(p.text || []).map((t) => `<li>${esc(t)}</li>`).join("")}</ul>
+    </div>`;
+  }
+  document.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-feel]");
+    if (!b || !DATA || DATA.demo) return;
+    try {
+      const r = await fetch("/api/feel", { method: "POST", headers: { "X-Vitals": "1", "Content-Type": "application/json" }, body: JSON.stringify({ feel: b.dataset.feel }) });
+      if (!r.ok) return;
+      const fresh = await (await fetch("/api/summary", { cache: "no-store" })).json();
+      DATA.personal = fresh.personal;
+      renderToday(DATA);
+    } catch { /* offline: the buttons stay as they were */ }
+  });
   function renderToday(d) {
-    const T = todayStats(d), B = archiveBaseline(d);
+    const T = todayStats(d), B = usualBaseline(d);
+    for (const k of ["rhr", "hrv", "avgHr"]) if (B[k]) B[k].own = B.own;
     VS.today = T; VS.baseline = B;
     const yr = B.end ? new Date(B.end).getFullYear() : "";
+    const versus = B.own ? `next to your usual from your last ${B.nights} nights` : `next to your usual from ${yr}`;
     $("#today-meta").textContent = T
-      ? `${dToday.format(new Date())} · strap data since ${dTime.format(T.first)}, compared with your WHOOP archive baseline (${yr})`
+      ? `From the strap since ${dTime.format(T.first)}, ${versus}`
       : `${dToday.format(new Date())} · no strap data yet today`;
     const host = $("#today-summary");
     if (!T) {
@@ -921,9 +973,10 @@
       <ul class="drivers">
         ${row("Average heart rate", T.avg, "bpm", B.avgHr, "--m-rhr", "")}
         ${row("Lowest heart rate", T.min, "bpm", B.rhr, "--m-rhr", "")}
-        ${T.rmssd ? row("HRV, daytime RMSSD", T.rmssd, "ms", B.hrv, "--m-hrv", "") : row("HRV, daytime RMSSD", null, "ms", null, "--m-hrv", `Needs more beat-to-beat (RR) data: ${T.nRR} intervals so far.`)}
+        ${T.rmssd ? row("HRV, daytime RMSSD", T.rmssd, "ms", B.hrv, "--m-hrv", "") : row("HRV, daytime RMSSD", null, "ms", null, "--m-hrv", `Needs more clean beat-to-beat data: ${T.nRR} usable intervals so far (the strap's beat timing is only reliable while you're still).`)}
       </ul>
-      <p class="fine">Baselines come from your last 30 archive days (through ${B.end ? dFull.format(+day(B.end)) : "—"}). Daytime HRV usually reads lower than WHOOP's overnight HRV.</p>`;
+      ${learnedBlock(d)}
+      <p class="fine">${B.own ? `Your usual comes from your own last ${B.nights} strap nights.` : `Baselines come from your last 30 archive days (through ${B.end ? dFull.format(+day(B.end)) : "—"}), until the strap has recorded a few of your nights.`} Daytime HRV reads lower than overnight HRV.</p>`;
 
     // Per-minute chart
     const buckets = new Map();
@@ -951,7 +1004,7 @@
       data: { datasets: [
         { label: "Min", data: mn, borderWidth: 0, pointRadius: 0, spanGaps: false },
         { label: "Max", data: mx, borderWidth: 0, pointRadius: 0, fill: "-1", backgroundColor: alpha(color, 0.18), spanGaps: false },
-        { label: "Average", data: av, borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: 2.5, pointHoverRadius: 5, tension: 0.25, spanGaps: false },
+        { label: "Average", data: av, borderColor: color, backgroundColor: color, borderWidth: 1.5, pointRadius: (c) => { const d = c.dataset.data; const i = c.dataIndex; return d[i] != null && d[i - 1] == null && d[i + 1] == null ? 1.5 : 0; }, pointHoverRadius: 4, tension: 0.25, spanGaps: false },
       ] },
       options: o,
       plugins: [avgLine, crosshair],
@@ -1104,7 +1157,12 @@
     renderDevice(DATA);
     renderRanged();
     document.querySelectorAll("[data-resync]").forEach((b) => {
-      b.disabled = !!DATA.demo;
+      b.disabled = !!DATA.demo || !!DATA.cloud;
+      if (DATA.cloud) {
+        const l = b.querySelector("[data-resync-label]");
+        if (l) l.textContent = "Syncs from your Mac";
+        b.setAttribute("aria-label", "Syncs automatically from your Mac");
+      }
       b.title = DATA.demo ? "Disabled on the demo database" : "Drain the strap, stream live HR, pull any new WHOOP scores";
     });
   }
@@ -1114,7 +1172,7 @@
     main.setAttribute("aria-busy", "true");
     err.hidden = true;
     try {
-      const r = await fetch("/api/summary", { cache: "no-store" });
+      const r = await fetch(summaryUrl(), { cache: "no-store" });
       if (!r.ok) throw new Error(r.status);
       DATA = await r.json();
       REC_BY_DAY = new Map();
@@ -1125,7 +1183,8 @@
       routePeriod();
       renderPeriod();
       dispatchEvent(new CustomEvent("vitals:data", { detail: DATA }));
-    } catch {
+    } catch (e) {
+      console.error(e);
       main.setAttribute("aria-busy", "false");
       err.hidden = false;
       $("#sync-status").textContent = "Offline";
@@ -1143,10 +1202,10 @@
     setInterval(async () => {
       if (!DATA || document.hidden) return;
       try {
-        const r = await fetch("/api/summary", { cache: "no-store" });
+        const r = await fetch(summaryUrl(), { cache: "no-store" });
         if (!r.ok) return;
         const fresh = await r.json();
-        DATA.today_hr = fresh.today_hr; DATA.sync = fresh.sync; DATA.counts = fresh.counts; DATA.soc = fresh.soc;
+        for (const k of ["today_hr", "today", "personal", "battery", "sync", "counts", "soc"]) DATA[k] = fresh[k];
         renderHeader(DATA);
         if (PERIOD === "today") renderToday(DATA);
         dispatchEvent(new CustomEvent("vitals:period", { detail: { period: PERIOD, date: ADATE } }));

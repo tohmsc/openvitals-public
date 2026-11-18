@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Always-on strap daemon: the laptop is the strap's host whenever it is nearby.
+
+One long-running process replaces the hourly collector and live.py:
+
+  strap in range  -> connect, drain everything it stored while away (lossless, into
+                     ble_raw), then hold the link: 1 Hz live HR/RR into ble_hr and
+                     another drain every --drain-every seconds
+  link drops      -> (walked away, laptop slept, strap rebooted) keep looking and
+                     reconnect; the strap keeps recording on its own in the meantime
+  on timers       -> WHOOP API sync (hourly), decode (5 min), backup (daily),
+                     cloud push (hourly), raw-frame archive to R2 + local cleanup (hourly),
+                     daily health summary to Telegram
+                     — in a worker thread, with or without the strap
+
+It holds .live.lock so nothing else fights for the strap (one host at a time).
+`collector.py` and the dashboard's Resync notice the lock and send SIGUSR1, which
+makes the daemon drain immediately.
+
+Run:  python daemon.py                 # Ctrl-C to stop
+      python daemon.py --no-drain      # live only; leave stored history on the strap
+      python daemon.py --no-cloud      # a separate cloud_sync job handles the cloud push
+Keep it running with launchd: see com.whoop.daemon.plist.
+"""
+import argparse, asyncio, json, os, signal, sys, time
+import db, whoop, collector
+
+LOCK = collector.LIVE_LOCK
+
+
+def log(*a):
+    print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
+
+
+async def find_strap(timeout=15.0):
+    """Quiet scan for a WHOOP by its service UUID. Returns an address or None."""
+    from bleak import BleakScanner
+    d = await BleakScanner.find_device_by_filter(
+        lambda dev, adv: whoop.WHOOP_SVC in (adv.service_uuids or []), timeout=timeout)
+    return d.address if d else None
+
+
+class Daemon:
+    def __init__(self, drain_every=300, do_drain=True, do_api=True, do_cloud=True,
+                 strap=whoop.Whoop, find=find_strap, addr=collector.env_addr):
+        self.drain_every = drain_every
+        self.do_drain = do_drain
+        self.strap, self.find, self.addr = strap, find, addr
+        # seconds between housekeeping runs; last-run times persist in sync_state
+        self.jobs = [("decode", 300, lambda: collector.run_decode(quiet=True)),
+                     ("backup", 86400, lambda: collector.run_backup(keep=7))]   # a week of dailies
+        if do_cloud:
+            self.jobs.append(("cloud", 3600, collector.run_cloud))
+        # last: ship old raw frames to R2 and delete them locally (no-op unless CF_R2_BUCKET is set)
+        self.jobs.append(("archive", 3600, collector.run_archive))
+        # morning message, nudges and /status replies (no-op unless TELEGRAM_BOT_TOKEN is set);
+        # runs on every housekeeping pass so a command gets its answer within about 30 s
+        self.jobs.append(("telegram", 20, collector.run_telegram))
+        if do_api:
+            self.jobs.insert(0, ("api", 3600, collector.run_api))
+        self.settle = 1.0          # pause after the init handshake
+        self.drain_timeout = 90
+        self.drain_stall = 20      # a drain with no frame at all for this long is abandoned
+        self.last_frame = 0.0      # when the strap last sent anything
+        self.stall = 60            # no live frame for this long -> reconnect
+        self.retry_min, self.retry_max = 5, 30
+        self.retry_job = 300       # a failed housekeeping job runs again after this long
+        self.tick = 1.0
+        self.c = None
+        self.stop = asyncio.Event()
+        self.drain_now = asyncio.Event()
+        self.frames = 0            # stored (non-live) frames this process captured
+        self.last_rt = 0.0
+        self.offset = None         # wall - strap RTC, as last recorded
+        self._said = None
+
+    def say(self, msg):
+        """Log a status line once, not on every retry."""
+        if msg != self._said:
+            self._said = msg
+            log(msg)
+
+    # ---------------- live stream ----------------
+    def on_realtime(self, r):
+        try:
+            now = time.time()
+            self.last_rt = self.last_frame = time.monotonic()
+            rr = collector.rr_ms(r)
+            c = self.c
+            if r["hr"] > 0:            # 0 = off the wrist; don't store a day of zeros
+                c.execute("INSERT OR REPLACE INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)",
+                          (now, r["hr"], " ".join(map(str, rr))))
+            c.execute("INSERT INTO sync_state(key,value) VALUES('live_hr_now',?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (json.dumps({"hr": r["hr"], "rr_ms": rr, "ts": now, "rtc": r["ts"]}),))
+            # Remember how the strap's clock maps to real time (once per connect, and
+            # again if it jumps), so stored records can be placed in time later.
+            offset = now - r["ts"]
+            if self.offset is None or abs(offset - self.offset) > 5:
+                self.offset = offset
+                c.execute("INSERT OR REPLACE INTO clock_sync(ts,rtc,offset) VALUES(?,?,?)",
+                          (now, r["ts"], round(offset, 3)))
+            c.commit()
+        except Exception as ex:        # never let a DB hiccup kill the BLE callback
+            log("live write error:", ex)
+
+    def mark_offline(self):
+        try:
+            db.set_state(self.c, "live_hr_now", json.dumps({"hr": None, "ts": time.time()}))
+        except Exception as ex:
+            log("state write error:", ex)
+
+    # ---------------- one connection ----------------
+    async def _or_stop(self, coro):
+        """Await coro, but give up as soon as the daemon is asked to stop."""
+        task = asyncio.ensure_future(coro)
+        stopper = asyncio.ensure_future(self.stop.wait())
+        await asyncio.wait({task, stopper}, return_when=asyncio.FIRST_COMPLETED)
+        stopper.cancel()
+        if not task.done():
+            task.cancel()
+            return None
+        return task.result()
+
+    async def drain(self, w):
+        """Drain stored data. Returns False if the strap went silent part-way.
+
+        A link can be "connected" yet dead (seen right after a drop): the strap sends
+        nothing and the drain would sit out its whole timeout. Give up after
+        drain_stall seconds of silence instead; the caller's next write then either
+        works or raises, which triggers a reconnect.
+        """
+        n0 = self.frames
+        self.last_frame = time.monotonic()
+        task = asyncio.ensure_future(w.drain(timeout=self.drain_timeout))
+        quiet = False
+        while not task.done():
+            await asyncio.wait({task}, timeout=self.tick)
+            quiet = time.monotonic() - self.last_frame > self.drain_stall
+            if quiet or self.stop.is_set() or not w.client.is_connected:
+                task.cancel()
+                break
+        self.c.commit()
+        if self.frames > n0:
+            db.set_state(self.c, "last_ble_sync", time.time())
+            log(f"drained {self.frames - n0} stored frames")
+        if quiet:
+            log(f"strap silent for {self.drain_stall}s during a drain — checking the link")
+        return not quiet
+
+    async def session(self, addr):
+        async with self.strap(addr) as w:
+            w.verbose = False
+            await w.init()
+            await asyncio.sleep(self.settle)
+            self.say(f"connected to {addr}")
+            sink = collector.raw_sink_for(self.c, skip=(whoop.T_REALTIME,))  # live HR goes to ble_hr
+
+            def counted(ch, inner):
+                self.last_frame = time.monotonic()
+                if inner[0] != whoop.T_REALTIME:
+                    self.frames += 1
+                sink(ch, inner)
+            w.raw_sink = counted
+            w.on_realtime = self.on_realtime
+            self.offset = None
+            self.last_rt = time.monotonic()
+            next_drain = 0.0
+            streaming = nudged = False
+            while not self.stop.is_set() and w.client.is_connected:
+                due = self.drain_now.is_set() or time.monotonic() >= next_drain
+                self.drain_now.clear()
+                if due and self.do_drain:          # --no-drain also ignores Resync's request
+                    ok = await self.drain(w)
+                    # an abandoned drain is retried soon, not a full interval later
+                    next_drain = time.monotonic() + (self.drain_every if ok else min(60, self.drain_every))
+                    streaming = False              # re-assert the stream after every drain
+                if self.stop.is_set():
+                    break
+                if not streaming:
+                    await w.realtime(True)
+                    streaming, nudged = True, False
+                    self.last_rt = time.monotonic()
+                quiet = time.monotonic() - self.last_rt
+                if quiet > self.stall:
+                    log(f"no live data for {int(quiet)}s — reconnecting")
+                    break
+                if quiet > self.stall / 3 and not nudged:
+                    await w.realtime(True)         # one nudge before giving up on the link
+                    nudged = True
+                elif quiet < self.tick * 2:
+                    nudged = False
+                await self.nap(self.tick, wake_on_drain=True)
+            try:
+                await w.realtime(False)
+            except Exception:
+                pass
+
+    async def nap(self, secs, wake_on_drain=False):
+        waits = [asyncio.ensure_future(self.stop.wait())]
+        if wake_on_drain:
+            waits.append(asyncio.ensure_future(self.drain_now.wait()))
+        await asyncio.wait(waits, timeout=secs, return_when=asyncio.FIRST_COMPLETED)
+        for t in waits:
+            t.cancel()
+
+    # ---------------- housekeeping (no Bluetooth) ----------------
+    async def housekeeping(self):
+        while not self.stop.is_set():
+            for name, every, fn in self.jobs:
+                key = f"daemon_last_{name}"
+                try:
+                    if time.time() - float(db.get_state(self.c, key, 0)) < every:
+                        continue
+                    ok = await asyncio.to_thread(fn)
+                    # a job that failed is tried again in 5 minutes, not a full interval later
+                    late = 0 if ok is not False else max(0, every - self.retry_job)
+                    db.set_state(self.c, key, time.time() - late)
+                except Exception as ex:
+                    log(f"{name} error:", ex)
+                if self.stop.is_set():
+                    return
+            await self.nap(30)
+
+    # ---------------- main loop ----------------
+    async def run(self):
+        holder = collector.lock_holder()
+        if holder:
+            log(f"another streamer (pid {holder}) already holds the strap — not starting")
+            return 1
+        with open(LOCK, "w") as f:
+            f.write(f"{os.getpid()} daemon")
+        self.c = db.connect()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, self.stop.set)
+        loop.add_signal_handler(signal.SIGUSR1, self.drain_now.set)
+        log(f"daemon up (pid {os.getpid()}), db {db.DB_PATH}")
+        chores = asyncio.ensure_future(self.housekeeping())
+        wait = self.retry_min
+        try:
+            while not self.stop.is_set():
+                t0 = time.monotonic()
+                try:
+                    addr = self.addr() or await self._or_stop(self.find())
+                    if addr:
+                        await self.session(addr)
+                        if not self.stop.is_set():
+                            self.say("strap disconnected — looking for it again")
+                    else:
+                        self.say("strap not in range — will connect when it shows up")
+                except Exception as ex:
+                    self.say(f"strap not reachable ({ex}) — retrying")
+                self.mark_offline()
+                # a link that lasted resets the backoff; quick failures stretch it
+                wait = self.retry_min if time.monotonic() - t0 > 60 else min(wait * 2, self.retry_max)
+                await self.nap(wait)
+        finally:
+            chores.cancel()
+            self.mark_offline()
+            try:
+                os.remove(LOCK)
+            except OSError:
+                pass
+            log("daemon stopped")
+        return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Always-on WHOOP strap daemon")
+    ap.add_argument("--drain-every", type=int, default=300,
+                    help="seconds between drains of stored data while connected (default 300)")
+    ap.add_argument("--no-drain", action="store_true",
+                    help="live stream only; never drain (and trim) the strap's stored history")
+    ap.add_argument("--no-api", action="store_true", help="skip the hourly WHOOP API sync")
+    ap.add_argument("--no-cloud", action="store_true",
+                    help="skip the hourly cloud push (use when a separate cloud_sync job runs)")
+    a = ap.parse_args()
+    d = Daemon(drain_every=a.drain_every, do_drain=not a.no_drain, do_api=not a.no_api,
+               do_cloud=not a.no_cloud)
+    sys.exit(asyncio.run(d.run()))
+
+
+if __name__ == "__main__":
+    main()

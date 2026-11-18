@@ -10,22 +10,14 @@ Run:  python live.py            # Ctrl-C to stop
 Wear the strap for a real pulse; on the charger it reports a flat resting value.
 """
 import asyncio, os, time, json, signal
-import db, whoop
+import db, whoop, collector
 
-HERE = os.path.dirname(__file__)
-LOCK = os.path.join(HERE, ".live.lock")
+LOCK = collector.LIVE_LOCK
+_env_addr = collector.env_addr
 _stop = False
 
 def _cleanup(*a):
     global _stop; _stop = True
-
-def _env_addr():
-    p = os.path.join(HERE, ".env")
-    if os.path.exists(p):
-        for line in open(p):
-            if line.startswith("WHOOP_BLE_ADDRESS="):
-                return line.strip().split("=", 1)[1] or None
-    return None
 
 async def stream_once(c):
     addr = _env_addr() or await whoop.find()
@@ -38,8 +30,9 @@ async def stream_once(c):
         def rt(r):
             now = time.time()
             rr = [round(x/1024*1000, 1) for x in r["rr_1024"] if x]
-            c.execute("INSERT OR REPLACE INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)",
-                      (now, r["hr"], " ".join(map(str, rr))))
+            if r["hr"] > 0:        # 0 = off the wrist: not a heart rate
+                c.execute("INSERT OR REPLACE INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)",
+                          (now, r["hr"], " ".join(map(str, rr))))
             db.set_state(c, "live_hr_now", json.dumps({"hr": r["hr"], "rr_ms": rr,
                                                        "ts": now, "rtc": r["ts"]}))
             c.commit()
@@ -57,7 +50,12 @@ async def stream_once(c):
 async def main():
     signal.signal(signal.SIGINT, _cleanup)
     signal.signal(signal.SIGTERM, _cleanup)
-    open(LOCK, "w").write(str(os.getpid()))
+    holder = collector.lock_holder()
+    if holder:
+        print(f"the strap is already held by pid {holder} (daemon.py streams live on its own) — not starting")
+        return
+    with open(LOCK, "w") as f:
+        f.write(str(os.getpid()))
     c = db.connect()
     try:
         while not _stop:
