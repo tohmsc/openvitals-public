@@ -2,290 +2,500 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111111" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fcfcfc" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Vitals">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
 <meta name="color-scheme" content="dark light">
 <title>Vitals · WHOOP local</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111317'/%3E%3Cpath d='M5 17h5l3-7 4 13 3-9 2 3h5' fill='none' stroke='%2333d1b4' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="/static/favicon.png">
 <script>
   // Apply the saved theme before first paint so there is no flash.
   (function () {
     var q = new URLSearchParams(location.search).get("theme");
-    var t = q || localStorage.getItem("vitals-theme");
+    var t = q;
+    try { t = t || localStorage.getItem("vitals-theme"); } catch (e) {}
     if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    if (new URLSearchParams(location.search).get("grid")) document.documentElement.dataset.grid = "1"; // show the 8px layout grid
   })();
 </script>
+<link rel="preload" href="/static/inter-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/inter-500.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/chart.umd.js" defer></script>
 <script src="/static/app.js" defer></script>
+<script src="/static/heart.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
 
-<header class="topbar">
-  <div class="topbar__inner">
-    <a class="brand" href="#overview" aria-label="Vitals, back to overview">
-      <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M5 17h5l3-7 4 13 3-9 2 3h5"/></svg>
-      <span class="brand__name">Vitals</span>
+<div class="shell">
+  <!-- ───────── Sidebar ───────── -->
+  <aside class="side" aria-label="App">
+    <a class="brand" href="#heart" aria-label="Vitals, back to overview">
+      <img class="brand__mark" src="/static/smiley.png" alt="" width="28" height="28">
+      <span class="brand__text"><span class="brand__name">Vitals</span><span class="brand__tag">Local</span></span>
     </a>
+    <div class="period side__period" role="group" aria-label="Time period">
+      <a class="period__btn" href="#today" data-period-btn="today"><span class="period__live" aria-hidden="true"></span>Today</a>
+      <button class="period__btn" type="button" data-cal data-period-btn="archive" aria-haspopup="dialog"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg><span data-archive-label>Archive</span></button>
+    </div>
+    <div class="side__tools">
+    <button class="side__sync" type="button" data-resync aria-label="Resync strap"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg></button>
+    <button class="side__theme" type="button" aria-label="Switch theme">
+      <svg class="i-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.5"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M4 4l1.4 1.4M14.6 14.6 16 16M4 16l1.4-1.4M14.6 5.4 16 4"/></svg>
+      <svg class="i-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7Z"/></svg>
+    </button>
+    </div>
+
+    <div class="patient">
+      <span class="patient__avatar" id="avatar" aria-hidden="true">·</span>
+      <div class="patient__meta">
+        <p class="patient__name" id="patient-name">Loading…</p>
+        <p class="patient__device"><span class="dot" id="side-dot" data-state="off" aria-hidden="true"></span><span id="side-device">WHOOP 4.0</span></p>
+      </div>
+    </div>
+
     <nav class="nav" aria-label="Sections">
-      <a href="#overview">Overview</a>
-      <a href="#trends">Trends</a>
-      <a href="#sleep">Sleep</a>
-      <a href="#activity">Activity</a>
-      <a href="#device">Device</a>
+      <p class="nav__label">Live</p>
+      <a href="#heart" data-view="heart"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16.5s-6-3.7-7.4-7.4C1.6 6.5 3.1 3.7 5.9 3.7c1.6 0 2.8.9 3.4 1.9h1.4c.6-1 1.8-1.9 3.4-1.9 2.8 0 4.3 2.8 3.3 5.4-1.4 3.7-7.4 7.4-7.4 7.4Z"/><path d="M4 10h3l1.2-2 2 4 1.3-2H16"/></svg>Heart</a>
+      <a href="#today"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 1.5"/></svg>Today</a>
+      <p class="nav__label">Archive <span class="nav__sub" data-archive-range></span></p>
+      <a href="#overview"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>Day</a>
+      <a href="#trends"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 14.5 7 9.5l3.5 3 7-8"/><path d="M13 4.5h4.5V9"/></svg>Trends</a>
+      <a href="#sleep"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7Z"/></svg>Sleep</a>
+      <a href="#activity"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M11 2.5 4.5 11h5l-1 6.5L15.5 9h-5l.5-6.5Z"/></svg>Activity</a>
+      <p class="nav__label">System</p>
+      <a href="#device"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="2.5" width="8" height="15" rx="3"/><path d="M8.5 10h3"/></svg>Device</a>
     </nav>
-    <div class="topbar__end">
-      <span class="sync" id="sync-status">Loading…</span>
-      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch to light theme">
-        <svg class="i-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.5"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M4 4l1.4 1.4M14.6 14.6 16 16M4 16l1.4-1.4M14.6 5.4 16 4"/></svg>
-        <svg class="i-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7Z"/></svg>
-      </button>
-    </div>
-  </div>
-</header>
 
-<main id="main" class="page" aria-busy="true">
-
-  <div class="alert" id="load-error" role="alert" hidden>
-    <strong>Couldn't load your data.</strong>
-    <span>The dashboard server didn't answer. Check that <code>dashboard.py</code> is running, then try again.</span>
-    <button class="btn" type="button" id="retry">Try again</button>
-  </div>
-
-  <!-- ───────── Overview ───────── -->
-  <section id="overview" class="section" aria-labelledby="overview-h">
-    <div class="section__head">
-      <div>
-        <p class="eyebrow" id="patient">Personal monitor</p>
-        <h1 id="overview-h" class="title">Overview</h1>
+    <div class="side__foot">
+      <div class="sidecard">
+        <div class="sidecard__row"><span>Strap</span><span id="side-ble">—</span></div>
+        <div class="sidecard__row"><span>Archive</span><span id="side-api">—</span></div>
+        <div class="sidecard__row"><span>Battery</span><span id="side-bat">—</span></div>
+        <button class="resync" type="button" data-resync><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg><span data-resync-label>Resync strap</span></button>
+        <p class="sync-msg" data-sync-msg aria-live="polite"></p>
       </div>
-      <p class="section__meta" id="as-of"></p>
+      <a class="side__signout" href="/logout" hidden data-cloud-only>Sign out</a>
+      <p class="side__note"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="9" width="12" height="8.5" rx="2"/><path d="M6.5 9V6.5a3.5 3.5 0 0 1 7 0V9"/></svg>All data stays on this Mac</p>
     </div>
+  </aside>
 
-    <div class="grid">
-      <article class="card card--recovery span-4" aria-labelledby="rec-h">
-        <header class="card__head">
-          <h2 id="rec-h" class="card__title">Recovery</h2>
-          <span class="card__hint" id="rec-date"></span>
+  <div class="main-col">
+    <!-- ───────── Full-screen heart view ───────── -->
+    <section class="hv" id="heart" aria-labelledby="hv-title">
+      <div class="hv__stage" id="hv-stage">
+        <header class="hv__head">
+          <p class="hv__eyebrow" id="hv-eyebrow">Today</p>
+          <h1 class="hv__title" id="hv-title">Heart</h1>
+          <div class="hv__period"><div class="period" role="group" aria-label="Time period">
+            <a class="period__btn" href="#today" data-period-btn="today"><span class="period__live" aria-hidden="true"></span>Today</a>
+            <button class="period__btn" type="button" data-cal data-period-btn="archive" aria-haspopup="dialog"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg><span data-archive-label>Archive</span></button>
+          </div></div>
+          <p class="hv__stale" id="hv-stale" hidden></p>
         </header>
-        <div class="recovery">
-          <div class="ring" id="rec-ring" data-zone="none">
-            <svg viewBox="0 0 120 120" aria-hidden="true">
-              <circle class="ring__track" cx="60" cy="60" r="52"/>
-              <circle class="ring__value" cx="60" cy="60" r="52" pathLength="100" stroke-dasharray="0 100"/>
-            </svg>
-            <div class="ring__label">
-              <span class="ring__num" id="rec-value">—</span>
-              <span class="ring__unit">%</span>
-            </div>
-          </div>
-          <p class="status" id="rec-status"><span class="status__icon" aria-hidden="true"></span><span class="status__text">No score yet</span></p>
-          <dl class="kv kv--inline" id="rec-drivers"></dl>
+
+        <div class="hv__tools">
+          <button class="hv-btn" type="button" id="hv-theme" aria-label="Toggle theme"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="M10 3.5v13a6.5 6.5 0 0 0 0-13Z" class="fill"/></svg></button>
+          <a class="hv-btn" href="#overview" aria-label="Open dashboard"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="2.5" width="6" height="7" rx="1.5"/><rect x="11.5" y="2.5" width="6" height="4" rx="1.5"/><rect x="2.5" y="12.5" width="6" height="5" rx="1.5"/><rect x="11.5" y="9.5" width="6" height="8" rx="1.5"/></svg></a>
+          <button class="hv-btn hv-btn--sync" type="button" data-resync aria-label="Resync strap and WHOOP cloud"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg></button>
+          <button class="hv-btn" type="button" id="hv-full" aria-label="Enter full screen"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7.5V3h4.5M12.5 3H17v4.5M17 12.5V17h-4.5M7.5 17H3v-4.5"/></svg></button>
         </div>
-      </article>
 
-      <article class="card card--monitor span-8" aria-labelledby="live-h">
-        <header class="card__head">
-          <h2 id="live-h" class="card__title">Heart rate</h2>
-          <span class="pill" id="live-pill" data-state="off"><span class="pill__dot" aria-hidden="true"></span><span id="live-pill-text">Offline</span></span>
-        </header>
-        <div class="monitor">
-          <div class="monitor__readout">
-            <div class="bpm">
-              <svg class="bpm__heart" id="heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-9.3-9.2C1.4 8 3.3 4.5 6.8 4.5c2 0 3.4 1.1 4.2 2.4h2c.8-1.3 2.2-2.4 4.2-2.4 3.5 0 5.4 3.5 4.1 6.8-1.8 4.6-9.3 9.2-9.3 9.2Z"/></svg>
-              <span class="bpm__num" id="live-hr">—</span>
-              <span class="bpm__unit">bpm</span>
-            </div>
-            <p class="monitor__note" id="live-note">Waiting for the strap</p>
-            <dl class="kv kv--stack" id="live-stats">
-              <div><dt>RR interval</dt><dd id="live-rr">—</dd></div>
-              <div><dt>Min / max</dt><dd id="live-range">—</dd></div>
-              <div><dt>Average</dt><dd id="live-avg">—</dd></div>
-            </dl>
-          </div>
-          <div class="monitor__trace">
-            <canvas id="c-live" role="img" aria-label="Recent heart rate trace"></canvas>
-          </div>
+        <div class="hv__rail" role="radiogroup" aria-label="Heart view mode">
+          <button class="hv-mode" type="button" role="radio" aria-checked="true" data-mode="pulse" title="Assembled"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 10h3.5l1.5-3.5 2.5 7 2-5 1.2 1.5h4.3"/></svg><span class="sr-only">Assembled view</span></button>
+          <button class="hv-mode" type="button" role="radio" aria-checked="false" data-mode="exploded" title="Exploded"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4.5h12M5.5 8.5h9M5.5 12.5h9M7.5 16.5h5"/></svg><span class="sr-only">Exploded view</span></button>
+          <button class="hv-mode hv-mode--toggle" type="button" id="hv-spin" aria-pressed="true" title="Auto-rotate"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.8-4.3M16 3.5v3.2h-3.2"/></svg><span class="sr-only">Auto-rotate</span></button>
         </div>
-      </article>
-    </div>
 
-    <h2 class="subhead">Vitals <span class="subhead__meta">Latest reading against your 30-day baseline</span></h2>
-    <div class="vitals" id="vitals"></div>
-  </section>
+        <canvas class="hv__heart" id="hv-canvas" role="img" aria-label="Animated heart"></canvas>
+        <svg class="hv__leaders" id="hv-leaders" aria-hidden="true"></svg>
+        <div class="hv__callouts" id="hv-callouts"></div>
 
-  <!-- ───────── Trends ───────── -->
-  <section id="trends" class="section" aria-labelledby="trends-h">
-    <div class="section__head">
-      <h2 id="trends-h" class="title">Trends</h2>
-      <fieldset class="seg" id="range">
-        <legend class="sr-only">Time range</legend>
-        <input type="radio" name="range" id="r30" value="30" checked><label for="r30">30D</label>
-        <input type="radio" name="range" id="r90" value="90"><label for="r90">90D</label>
-        <input type="radio" name="range" id="r180" value="180"><label for="r180">6M</label>
-        <input type="radio" name="range" id="r365" value="365"><label for="r365">1Y</label>
-      </fieldset>
-    </div>
-    <div class="grid">
-      <article class="card span-12" aria-labelledby="t-rec-h">
-        <header class="card__head">
-          <div>
-            <h3 id="t-rec-h" class="card__title">Recovery</h3>
-            <p class="card__stat" id="t-rec-stat"></p>
-          </div>
-          <ul class="legend" aria-label="Recovery zones">
-            <li><span class="swatch swatch--good"></span>High 67–100</li>
-            <li><span class="swatch swatch--fair"></span>Moderate 34–66</li>
-            <li><span class="swatch swatch--low"></span>Low 0–33</li>
-          </ul>
-        </header>
-        <div class="chart chart--md"><canvas id="c-rec" role="img"></canvas></div>
-      </article>
-      <article class="card span-6" aria-labelledby="t-hrv-h">
-        <header class="card__head">
-          <div>
-            <h3 id="t-hrv-h" class="card__title">Heart rate variability</h3>
-            <p class="card__stat" id="t-hrv-stat"></p>
-          </div>
-          <ul class="legend" aria-label="Chart key">
-            <li><span class="line-key line-key--thin" style="--c:var(--m-hrv)"></span>Daily</li>
-            <li><span class="line-key" style="--c:var(--m-hrv)"></span>7-day average</li>
-            <li><span class="band-key"></span>Usual range (±1 SD)</li>
-          </ul>
-        </header>
-        <div class="chart chart--sm"><canvas id="c-hrv" role="img"></canvas></div>
-      </article>
-      <article class="card span-6" aria-labelledby="t-rhr-h">
-        <header class="card__head">
-          <div>
-            <h3 id="t-rhr-h" class="card__title">Resting heart rate</h3>
-            <p class="card__stat" id="t-rhr-stat"></p>
-          </div>
-          <ul class="legend" aria-label="Chart key">
-            <li><span class="line-key line-key--thin" style="--c:var(--m-rhr)"></span>Daily</li>
-            <li><span class="line-key" style="--c:var(--m-rhr)"></span>7-day average</li>
-            <li><span class="band-key"></span>Usual range (±1 SD)</li>
-          </ul>
-        </header>
-        <div class="chart chart--sm"><canvas id="c-rhr" role="img"></canvas></div>
-      </article>
-    </div>
-  </section>
-
-  <!-- ───────── Sleep ───────── -->
-  <section id="sleep" class="section" aria-labelledby="sleep-h">
-    <div class="section__head"><h2 id="sleep-h" class="title">Sleep</h2></div>
-    <div class="grid">
-      <article class="card span-4" aria-labelledby="ln-h">
-        <header class="card__head">
-          <h3 id="ln-h" class="card__title">Last night</h3>
-          <span class="card__hint" id="ln-date"></span>
-        </header>
-        <div class="lastnight" id="lastnight"></div>
-      </article>
-      <article class="card span-8" aria-labelledby="sh-h">
-        <header class="card__head">
-          <div>
-            <h3 id="sh-h" class="card__title">Sleep stages</h3>
-            <p class="card__stat" id="sh-stat"></p>
-          </div>
-          <ul class="legend" aria-label="Sleep stages">
-            <li><span class="swatch" style="--c:var(--stage-deep)"></span>Deep</li>
-            <li><span class="swatch" style="--c:var(--stage-rem)"></span>REM</li>
-            <li><span class="swatch" style="--c:var(--stage-light)"></span>Light</li>
-            <li><span class="swatch" style="--c:var(--stage-awake)"></span>Awake</li>
-          </ul>
-        </header>
-        <div class="chart chart--md"><canvas id="c-sleep" role="img"></canvas></div>
-      </article>
-    </div>
-  </section>
-
-  <!-- ───────── Activity ───────── -->
-  <section id="activity" class="section" aria-labelledby="activity-h">
-    <div class="section__head"><h2 id="activity-h" class="title">Activity</h2></div>
-    <div class="grid">
-      <article class="card span-7" aria-labelledby="st-h">
-        <header class="card__head">
-          <div>
-            <h3 id="st-h" class="card__title">Day strain</h3>
-            <p class="card__stat" id="st-stat"></p>
-          </div>
-          <span class="card__hint">Scale 0–21</span>
-        </header>
-        <div class="chart chart--md"><canvas id="c-strain" role="img"></canvas></div>
-      </article>
-      <article class="card span-5" aria-labelledby="hz-h">
-        <header class="card__head">
-          <div>
-            <h3 id="hz-h" class="card__title">Heart rate zones</h3>
-            <p class="card__stat" id="hz-stat"></p>
-          </div>
-          <span class="card__hint">% of max HR</span>
-        </header>
-        <div class="zones" id="zones"></div>
-      </article>
-      <article class="card span-12 card--flush" aria-labelledby="wo-h">
-        <header class="card__head card__head--pad">
-          <h3 id="wo-h" class="card__title">Workouts</h3>
-          <span class="card__hint" id="wo-count"></span>
-        </header>
-        <div class="table-wrap" tabindex="0" role="region" aria-labelledby="wo-h">
-          <table class="table">
-            <thead>
-              <tr>
-                <th scope="col">Date</th>
-                <th scope="col">Activity</th>
-                <th scope="col" class="num">Duration</th>
-                <th scope="col">Strain</th>
-                <th scope="col" class="num">Avg HR</th>
-                <th scope="col" class="num">Max HR</th>
-                <th scope="col" class="num">Energy</th>
-              </tr>
-            </thead>
-            <tbody id="wo-body"></tbody>
-          </table>
+        <div class="hv__pulse">
+          <div class="hv__pulse-head"><span class="hv__pulse-dot" id="hv-pulse-dot"></span><span id="hv-pulse-state">Offline</span><span class="hv__pulse-meta" id="hv-pulse-meta"></span></div>
+          <canvas id="hv-ecg" aria-hidden="true"></canvas>
+          <p class="hv__pulse-note">Drawn from beat timing, not an ECG.</p>
         </div>
-        <div class="card__foot"><button class="btn btn--ghost" type="button" id="wo-more" hidden>Show all workouts</button></div>
-      </article>
-    </div>
-  </section>
 
-  <!-- ───────── Device ───────── -->
-  <section id="device" class="section" aria-labelledby="device-h">
-    <div class="section__head"><h2 id="device-h" class="title">Device</h2></div>
-    <div class="grid">
-      <div class="stack span-4">
-        <article class="card" aria-labelledby="bat-h">
-          <header class="card__head">
-            <h3 id="bat-h" class="card__title">Strap battery</h3>
-            <span class="card__hint">From firmware reports</span>
-          </header>
-          <div class="battery" id="battery"></div>
-          <div class="chart chart--xs"><canvas id="c-soc" role="img"></canvas></div>
-        </article>
-        <article class="card" aria-labelledby="rec-count-h">
-          <header class="card__head">
-            <h3 id="rec-count-h" class="card__title">Stored records</h3>
-            <span class="card__hint">whoop.db</span>
-          </header>
-          <dl class="kv kv--rows" id="counts"></dl>
-        </article>
+        <div class="hv__timeline" id="hv-timeline" role="listbox" aria-label="Choose a day" tabindex="0"></div>
+        <p class="hv__drag-hint" aria-hidden="true">Drag to rotate</p>
       </div>
-      <article class="card span-8 card--flush" aria-labelledby="log-h">
-        <header class="card__head card__head--pad">
-          <h3 id="log-h" class="card__title">Firmware log</h3>
-          <span class="card__hint">Decoded from the strap, newest first</span>
-        </header>
-        <ol class="log" id="logs" tabindex="0" aria-labelledby="log-h"></ol>
-      </article>
-    </div>
-  </section>
-</main>
 
-<footer class="footer">
-  <p>Personal tracking tool built on a reverse-engineered strap protocol and the WHOOP API. Not a medical device; don't use it for clinical decisions.</p>
-  <p>All data stays on this Mac.</p>
-</footer>
+      <aside class="hv__side" aria-label="Summary">
+        <article class="hv-card hv-card--rec" id="hv-rec" data-zone="none">
+          <p class="hv-card__label">Recovery</p>
+          <p class="hv-card__num"><span id="hv-rec-num">—</span></p>
+          <p class="hv-card__sub" id="hv-rec-sub">&nbsp;</p>
+          <p class="hv-card__foot"><span class="hv-dot"></span><span id="hv-rec-zone">No score</span></p>
+        </article>
+        <article class="hv-card hv-card--count">
+          <p class="hv-card__label">Measurements</p>
+          <p class="hv-card__num hv-card__num--sm" id="hv-count">—</p>
+          <p class="hv-card__sub">records stored on this Mac</p>
+        </article>
+      </aside>
+    </section>
+    <!-- ───────── Header ───────── -->
+    <header class="topbar">
+      <div class="topbar__inner">
+        <div class="topbar__title">
+          <p class="eyebrow" id="today">&nbsp;</p>
+          <h1 class="greeting" id="greeting">Overview</h1>
+        </div>
+        <div class="topbar__end">
+          <div class="period" role="group" aria-label="Time period">
+            <a class="period__btn" href="#today" data-period-btn="today"><span class="period__live" aria-hidden="true"></span>Today</a>
+            <button class="period__btn" type="button" data-cal data-period-btn="archive" aria-haspopup="dialog"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg><span data-archive-label>Archive</span></button>
+          </div>
+          <span class="chip" id="sync-status"><span class="dot" aria-hidden="true"></span><span id="sync-text">Loading…</span></span>
+          <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch to light theme">
+            <svg class="i-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.5"/><path d="M10 1.5v2M10 16.5v2M1.5 10h2M16.5 10h2M4 4l1.4 1.4M14.6 14.6 16 16M4 16l1.4-1.4M14.6 5.4 16 4"/></svg>
+            <svg class="i-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 12.2A7 7 0 0 1 7.8 3.5a7 7 0 1 0 8.7 8.7Z"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="page" aria-busy="true">
+
+      <div class="alert" id="load-error" role="alert" hidden>
+        <strong>Couldn't load your data.</strong>
+        <span>The dashboard server didn't answer. Check that <code>dashboard.py</code> is running, then try again.</span>
+        <button class="btn" type="button" id="retry">Try again</button>
+      </div>
+
+      <!-- ───────── Today (strap only) ───────── -->
+      <section id="today" class="section section--first" data-scope="today" aria-labelledby="today-h">
+        <div class="section__head">
+          <div>
+            <h2 id="today-h" class="title">Today</h2>
+            <p class="section__meta" id="today-meta">Straight from your strap</p>
+          </div>
+          <button class="btn btn--primary" type="button" data-resync><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg><span data-resync-label>Resync strap</span></button>
+        </div>
+        <div class="grid" id="today-grid">
+          <article class="card card--monitor span-7" aria-labelledby="live-h">
+            <div class="monitor">
+              <header class="monitor__head">
+                <h3 id="live-h" class="monitor__title">Heart rate</h3>
+                <span class="monitor__src">Strap · BLE</span>
+                <span class="pill" id="live-pill" data-state="off"><span class="pill__dot" aria-hidden="true"></span><span id="live-pill-text">Offline</span></span>
+              </header>
+              <div class="monitor__body">
+                <div class="monitor__readout">
+                  <div class="bpm">
+                    <span class="bpm__num" id="live-hr">—</span><span class="bpm__unit">bpm</span>
+                    <span class="bpm__limits" aria-label="Display limits 40 to 180 bpm"><span>180</span><span>40</span></span>
+                  </div>
+                  <p class="monitor__note" id="live-note">Waiting for the strap</p>
+                  <dl class="mstats" id="live-stats">
+                    <div><dt>RR</dt><dd id="live-rr">—</dd></div>
+                    <div><dt>Min / Max</dt><dd id="live-range">—</dd></div>
+                    <div><dt>Avg</dt><dd id="live-avg">—</dd></div>
+                  </dl>
+                </div>
+                <div class="monitor__trace">
+                  <svg class="bpm__heart" id="heart" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-9.3-9.2C1.4 8 3.3 4.5 6.8 4.5c2 0 3.4 1.1 4.2 2.4h2c.8-1.3 2.2-2.4 4.2-2.4 3.5 0 5.4 3.5 4.1 6.8-1.8 4.6-9.3 9.2-9.3 9.2Z"/></svg>
+                  <canvas id="c-live" role="img" aria-label="Recent heart rate trace"></canvas>
+                </div>
+              </div>
+            </div>
+          </article>
+          <article class="card span-5" aria-labelledby="ts-h">
+            <header class="card__head">
+              <div>
+                <h3 id="ts-h" class="card__title">Recorded today</h3>
+                <p class="card__hint" id="ts-hint"></p>
+              </div>
+            </header>
+            <div class="today-sum" id="today-summary"></div>
+          </article>
+          <article class="card span-12" aria-labelledby="th-h">
+            <header class="card__head">
+              <div>
+                <h3 id="th-h" class="card__title">Heart rate today</h3>
+                <p class="card__stat" id="today-stat"></p>
+              </div>
+              <ul class="legend" aria-label="Chart key">
+                <li><span class="line-key" style="--c:var(--m-hr-ui)"></span>Per-minute average</li>
+                <li><span class="band-key band-key--hr"></span>Min–max</li>
+                <li><span class="dash-key"></span>Archive resting HR</li>
+              </ul>
+            </header>
+            <div class="chart chart--md"><canvas id="c-today" role="img"></canvas></div>
+          </article>
+        </div>
+      </section>
+
+      <div class="notice notice--archive" data-scope="archive">
+        <span class="notice__icon" aria-hidden="true"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg></span>
+        <div class="notice__body">
+          <p class="notice__title" id="arch-title">Archive</p>
+          <p class="notice__text" id="arch-text">WHOOP history. Nothing on this page is from today.</p>
+        </div>
+        <button class="btn" type="button" data-cal><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="2.5"/><path d="M3 8h14M7 2.5v3M13 2.5v3"/></svg>Change date</button>
+        <a class="btn btn--primary" href="#today">Back to today</a>
+      </div>
+
+      <!-- ───────── Overview ───────── -->
+      <section id="overview" class="section section--first" data-scope="archive" aria-labelledby="overview-h">
+        <div class="section__head">
+          <div>
+            <h2 id="overview-h" class="title" data-archive-day>Day</h2>
+            <p class="section__meta">Scores WHOOP computed for this day</p>
+          </div>
+        </div>
+        <div class="grid">
+          <article class="card card--readiness span-5" aria-labelledby="rec-h">
+            <header class="card__head">
+              <div>
+                <h3 id="rec-h" class="card__title">Recovery</h3>
+                <p class="card__hint" id="rec-date"></p>
+              </div>
+              <p class="status-chip" id="rec-status" data-zone="none"><span class="status__icon" aria-hidden="true"></span><span class="status__text">No score yet</span></p>
+            </header>
+            <div class="readiness">
+              <div class="ring" id="rec-ring" data-zone="none">
+                <svg viewBox="0 0 120 120" aria-hidden="true">
+                  <circle class="ring__ticks" cx="60" cy="60" r="57" pathLength="120"/>
+                  <circle class="ring__track" cx="60" cy="60" r="48"/>
+                  <circle class="ring__glow" cx="60" cy="60" r="48" pathLength="100" stroke-dasharray="0 100"/>
+                  <circle class="ring__value" cx="60" cy="60" r="48" pathLength="100" stroke-dasharray="0 100"/>
+                </svg>
+                <div class="ring__label">
+                  <span class="ring__num" id="rec-value">—</span>
+                  <span class="ring__unit">%</span>
+                </div>
+              </div>
+              <ul class="drivers" id="rec-drivers" aria-label="Recovery contributors"></ul>
+            </div>
+            <p class="insight" id="rec-insight"></p>
+          </article>
+          <article class="card span-7" aria-labelledby="gl-h">
+            <header class="card__head">
+              <h3 id="gl-h" class="card__title">Day at a glance</h3>
+              <span class="card__hint" id="gl-hint"></span>
+            </header>
+            <div class="glance" id="glance"></div>
+          </article>
+
+        </div>
+
+        <div class="subhead">
+          <h2>Vitals</h2>
+          <p class="subhead__meta">This day against the 30 days before it</p>
+        </div>
+        <div class="vitals" id="vitals"></div>
+      </section>
+
+      <!-- ───────── Trends ───────── -->
+      <section id="trends" class="section" data-scope="archive" aria-labelledby="trends-h">
+        <div class="section__head">
+          <div>
+            <h2 id="trends-h" class="title">Trends</h2>
+            <p class="section__meta">Daily scores with 7-day averages and your usual range</p>
+          </div>
+          <fieldset class="seg" id="range">
+            <legend class="sr-only">Time range</legend>
+            <input type="radio" name="range" id="r30" value="30" checked><label for="r30">30D</label>
+            <input type="radio" name="range" id="r90" value="90"><label for="r90">90D</label>
+            <input type="radio" name="range" id="r180" value="180"><label for="r180">6M</label>
+            <input type="radio" name="range" id="r365" value="365"><label for="r365">1Y</label>
+          </fieldset>
+        </div>
+        <div class="grid">
+          <article class="card span-12" aria-labelledby="t-rec-h">
+            <header class="card__head">
+              <div>
+                <h3 id="t-rec-h" class="card__title">Recovery</h3>
+                <p class="card__stat" id="t-rec-stat"></p>
+              </div>
+              <ul class="legend" aria-label="Recovery zones">
+                <li><span class="swatch swatch--good"></span>High 67–100</li>
+                <li><span class="swatch swatch--fair"></span>Moderate 34–66</li>
+                <li><span class="swatch swatch--low"></span>Low 0–33</li>
+                <li><span class="dash-key"></span>Average</li>
+              </ul>
+            </header>
+            <div class="chart chart--md"><canvas id="c-rec" role="img"></canvas></div>
+          </article>
+          <article class="card span-6" aria-labelledby="t-hrv-h">
+            <header class="card__head">
+              <div>
+                <h3 id="t-hrv-h" class="card__title">Heart rate variability</h3>
+                <p class="card__stat" id="t-hrv-stat"></p>
+              </div>
+              <ul class="legend" aria-label="Chart key">
+                <li><span class="line-key line-key--thin" style="--c:var(--m-hrv)"></span>Daily</li>
+                <li><span class="line-key" style="--c:var(--m-hrv)"></span>7-day</li>
+                <li><span class="band-key"></span>Usual range</li>
+              </ul>
+            </header>
+            <div class="chart chart--sm"><canvas id="c-hrv" role="img"></canvas></div>
+          </article>
+          <article class="card span-6" aria-labelledby="t-rhr-h">
+            <header class="card__head">
+              <div>
+                <h3 id="t-rhr-h" class="card__title">Resting heart rate</h3>
+                <p class="card__stat" id="t-rhr-stat"></p>
+              </div>
+              <ul class="legend" aria-label="Chart key">
+                <li><span class="line-key line-key--thin" style="--c:var(--m-rhr)"></span>Daily</li>
+                <li><span class="line-key" style="--c:var(--m-rhr)"></span>7-day</li>
+                <li><span class="band-key"></span>Usual range</li>
+              </ul>
+            </header>
+            <div class="chart chart--sm"><canvas id="c-rhr" role="img"></canvas></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ───────── Sleep ───────── -->
+      <section id="sleep" class="section" data-scope="archive" aria-labelledby="sleep-h">
+        <div class="section__head">
+          <div>
+            <h2 id="sleep-h" class="title">Sleep</h2>
+            <p class="section__meta">Stage breakdown scored by WHOOP</p>
+          </div>
+        </div>
+        <div class="grid">
+          <article class="card span-4" aria-labelledby="ln-h">
+            <header class="card__head">
+              <h3 id="ln-h" class="card__title">Last night</h3>
+              <span class="card__hint" id="ln-date"></span>
+            </header>
+            <div class="lastnight" id="lastnight"></div>
+          </article>
+          <article class="card span-8" aria-labelledby="sh-h">
+            <header class="card__head">
+              <div>
+                <h3 id="sh-h" class="card__title">Sleep stages</h3>
+                <p class="card__stat" id="sh-stat"></p>
+              </div>
+              <ul class="legend" aria-label="Sleep stages">
+                <li><span class="swatch" style="--c:var(--stage-deep)"></span>Deep</li>
+                <li><span class="swatch" style="--c:var(--stage-rem)"></span>REM</li>
+                <li><span class="swatch" style="--c:var(--stage-light)"></span>Light</li>
+                <li><span class="swatch" style="--c:var(--stage-awake)"></span>Awake</li>
+              </ul>
+            </header>
+            <div class="chart chart--md"><canvas id="c-sleep" role="img"></canvas></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ───────── Activity ───────── -->
+      <section id="activity" class="section" data-scope="archive" aria-labelledby="activity-h">
+        <div class="section__head">
+          <div>
+            <h2 id="activity-h" class="title">Activity</h2>
+            <p class="section__meta">Cardiovascular load and training intensity</p>
+          </div>
+        </div>
+        <div class="grid">
+          <article class="card span-7" aria-labelledby="st-h">
+            <header class="card__head">
+              <div>
+                <h3 id="st-h" class="card__title">Day strain</h3>
+                <p class="card__stat" id="st-stat"></p>
+              </div>
+              <span class="card__hint">Scale 0–21</span>
+            </header>
+            <div class="chart chart--md"><canvas id="c-strain" role="img"></canvas></div>
+          </article>
+          <article class="card span-5" aria-labelledby="hz-h">
+            <header class="card__head">
+              <div>
+                <h3 id="hz-h" class="card__title">Heart rate zones</h3>
+                <p class="card__stat" id="hz-stat"></p>
+              </div>
+              <span class="card__hint">% of max HR</span>
+            </header>
+            <div class="zones" id="zones"></div>
+          </article>
+          <article class="card span-12 card--flush" aria-labelledby="wo-h">
+            <header class="card__head card__head--pad">
+              <h3 id="wo-h" class="card__title">Workouts</h3>
+              <span class="card__hint" id="wo-count"></span>
+            </header>
+            <div class="table-wrap" tabindex="0" role="region" aria-labelledby="wo-h">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th scope="col">Date</th>
+                    <th scope="col">Activity</th>
+                    <th scope="col" class="num">Duration</th>
+                    <th scope="col">Strain</th>
+                    <th scope="col" class="num">Avg HR</th>
+                    <th scope="col" class="num">Max HR</th>
+                    <th scope="col" class="num">Energy</th>
+                  </tr>
+                </thead>
+                <tbody id="wo-body"></tbody>
+              </table>
+            </div>
+            <div class="card__foot"><button class="btn btn--ghost" type="button" id="wo-more" hidden>Show all workouts</button></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ───────── Device ───────── -->
+      <section id="device" class="section" aria-labelledby="device-h">
+        <div class="section__head">
+          <div>
+            <h2 id="device-h" class="title">Device</h2>
+            <p class="section__meta">Decoded directly from the strap over Bluetooth</p>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="stack span-4">
+            <article class="card" aria-labelledby="bat-h">
+              <header class="card__head">
+                <h3 id="bat-h" class="card__title">Strap battery</h3>
+                <span class="card__hint">Firmware SOC reports</span>
+              </header>
+              <div class="battery" id="battery"></div>
+              <div class="chart chart--xs"><canvas id="c-soc" role="img"></canvas></div>
+            </article>
+            <article class="card" aria-labelledby="rec-count-h">
+              <header class="card__head">
+                <h3 id="rec-count-h" class="card__title">Stored records</h3>
+                <span class="card__hint"><code>whoop.db</code></span>
+              </header>
+              <dl class="kv kv--rows" id="counts"></dl>
+            </article>
+          </div>
+          <article class="card span-8 card--console" aria-labelledby="log-h">
+            <header class="console__head">
+              <span class="console__dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <h3 id="log-h" class="console__title">Firmware log</h3>
+              <span class="console__hint">newest first</span>
+            </header>
+            <ol class="log" id="logs" tabindex="0" aria-labelledby="log-h"></ol>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Personal tracking tool built on a reverse-engineered strap protocol and the WHOOP API. Not a medical device; don't use it for clinical decisions.</p>
+      <p>Vitals · local build</p>
+    </footer>
+  </div>
+</div>
+<nav class="tabbar" aria-label="Views">
+  <a href="#heart" data-tab="heart"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7-4.4-8.7-8.8C2 8 3.8 4.8 7 4.8c1.9 0 3.2 1 4 2.2h2c.8-1.2 2.1-2.2 4-2.2 3.2 0 5 3.2 3.7 6.4C19 15.6 12 20 12 20Z"/></svg><span>Heart</span></a>
+  <a href="#today" data-tab="today"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span>Today</span></a>
+  <a href="#overview" data-tab="archive"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg><span>Archive</span></a>
+  <a href="#device" data-tab="device"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="3" width="10" height="18" rx="3.5"/><path d="M10 12h4"/></svg><span>Device</span></a>
+</nav>
+<div class="cal" id="cal" role="dialog" aria-label="Choose a date" hidden></div>
 </body>
 </html>

@@ -4,15 +4,18 @@
 The front end lives in static/ (index.html, app.css, app.js, vendored Chart.js) and
 works fully offline. This file only serves it plus two JSON endpoints.
 """
-import json, time, os
-from flask import Flask, jsonify, send_from_directory
-import db
+import json, time, os, sys, subprocess, threading
+from flask import Flask, jsonify, request, send_from_directory
+import db, learn, metrics
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 app = Flask(__name__, static_folder=STATIC, static_url_path="/static")
 
 HISTORY = 400  # ~13 months; the client filters by range
+# Folder holding collector.py + .env + .tokens.json (defaults to this one).
+WHOOP_HOME = os.environ.get("WHOOP_HOME") or HERE
+DEMO = "demo" in os.path.basename(db.DB_PATH)
 
 
 def rows(c, q, *a):
@@ -38,13 +41,32 @@ def summary():
         except ValueError:
             w["zones"] = None
     profile = {r["key"]: r["value"] for r in c.execute("SELECT key,value FROM api_profile")}
+    # Newest first by arrival, not by rtc: rtc is the firmware's tick counter and restarts
+    # when the strap reboots, so after a reboot the newest lines carry the smallest numbers.
     logs = []
     if _has(c, "device_logs"):
-        logs = rows(c, "SELECT rtc,subsystem,message FROM device_logs ORDER BY rtc DESC LIMIT 60")
+        logs = rows(c, "SELECT rtc,subsystem,message FROM device_logs ORDER BY rowid DESC LIMIT 60")
         for l in logs:
             l["message"] = _clean(l["message"])
+    soc = []
+    if _has(c, "device_soc"):
+        db.add_columns(c, [("device_soc", "seen", "REAL")])      # a database decode.py hasn't touched since
+        soc = rows(c, "SELECT rtc,soc_pct FROM device_soc ORDER BY COALESCE(seen, 0), rtc")
     last_ble = db.get_state(c, "last_ble_sync")
+    # "Today" = strap data since local midnight. The WHOOP cloud tables are the archive.
+    midnight, tomorrow = metrics.day_bounds(0)
+    today_hr = rows(c, "SELECT ts,hr,rr_ms FROM ble_hr WHERE ts >= ? AND hr > 0 ORDER BY ts", midnight)
+    stats = metrics.day_stats(c, midnight, tomorrow, learn.high_hr(c)) or {}
+    arch = c.execute("SELECT MIN(created_at) a, MAX(created_at) b FROM api_recovery").fetchone()
+    feel = c.execute("SELECT feel FROM daily_night WHERE date=?", (time.strftime("%Y-%m-%d"),)).fetchone()
     return jsonify({
+        "today_hr": today_hr,
+        # same numbers the Telegram message uses (metrics.py), so the two never disagree
+        "today": {k: stats.get(k) for k in ("rmssd", "n_rr", "resting", "high_s", "recorded_s")},
+        "battery": metrics.battery(c),
+        "personal": dict(learn.summary(c), text=learn.learned_text(c).replace("• ", "").split("\n"),
+                         feel=learn.FEEL_WORD.get(feel["feel"]) if feel and feel["feel"] else None),
+        "archive": {"start": arch["a"], "end": arch["b"]},
         "profile": {"first_name": profile.get("first_name")},
         "recovery": rows(c, "SELECT created_at,recovery_score,hrv_rmssd_ms,resting_hr,spo2,skin_temp_c "
                              "FROM api_recovery WHERE recovery_score IS NOT NULL "
@@ -57,9 +79,10 @@ def summary():
                          "WHERE strain IS NOT NULL ORDER BY start DESC LIMIT ?", HISTORY),
         "workout": workouts,
         "live_hr": rows(c, "SELECT ts,hr FROM ble_hr ORDER BY ts DESC LIMIT 600"),
-        "soc": rows(c, "SELECT rtc,soc_pct FROM device_soc ORDER BY rtc") if _has(c, "device_soc") else [],
+        "soc": soc,
         "logs": logs,
         "sync": {"ble": float(last_ble) if last_ble else None, "api": db.get_state(c, "api_since")},
+        "demo": DEMO,
         "counts": {t: c.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
                    for t in ("api_recovery", "api_sleep", "api_cycle", "api_workout", "ble_hr", "ble_raw")},
     })
@@ -76,6 +99,60 @@ def live():
                     "ts": cur.get("ts"),
                     "age": round(time.time() - cur.get("ts", 0), 1) if cur.get("ts") else None,
                     "recent": list(reversed(recent))})
+
+
+# ───────── Resync: run one collector cycle (strap drain + live HR + WHOOP API + decode + backup) ─────────
+SYNC = {"running": False, "started": None, "finished": None, "ok": None, "log": []}
+_sync_lock = threading.Lock()
+
+
+def _run_sync():
+    env = dict(os.environ, WHOOP_DB=db.DB_PATH, PYTHONUNBUFFERED="1")
+    try:
+        p = subprocess.Popen([sys.executable, "collector.py", "--live", "15"], cwd=WHOOP_HOME, env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in p.stdout:
+            line = line.strip()
+            if line:
+                SYNC["log"] = (SYNC["log"] + [line])[-40:]
+        SYNC["ok"] = p.wait(timeout=600) == 0
+    except Exception as ex:  # noqa: BLE001 - surface anything to the UI
+        SYNC["log"] = SYNC["log"] + [f"error: {ex}"]
+        SYNC["ok"] = False
+    finally:
+        SYNC["running"] = False
+        SYNC["finished"] = time.time()
+
+
+@app.route("/api/sync", methods=["GET", "POST"])
+def resync():
+    if request.method == "POST":
+        # Custom header = browsers must preflight, so other sites can't trigger this.
+        if request.headers.get("X-Vitals") != "1":
+            return jsonify({"error": "missing header"}), 403
+        if DEMO:
+            return jsonify({"error": "Demo database: syncing is disabled so real data never lands in it."}), 409
+        with _sync_lock:
+            if SYNC["running"]:
+                return jsonify(SYNC), 409
+            SYNC.update(running=True, started=time.time(), finished=None, ok=None, log=[])
+        threading.Thread(target=_run_sync, daemon=True).start()
+    return jsonify(SYNC)
+
+
+@app.route("/api/feel", methods=["POST"])
+def feel():
+    """Record how you feel today (good / ok / rough); learn.py tunes its calls to these answers."""
+    if request.headers.get("X-Vitals") != "1":
+        return jsonify({"error": "missing header"}), 403
+    word = (request.get_json(silent=True) or {}).get("feel")
+    if word not in learn.FEEL:
+        return jsonify({"error": "feel must be good, ok or rough"}), 400
+    if DEMO:
+        return jsonify({"error": "Demo database: nothing is recorded."}), 409
+    c = db.connect()
+    learn.record_feel(c, word)
+    return jsonify({"feel": word, "thresholds": learn.thresholds(c)})
 
 
 @app.route("/static/chart.js")

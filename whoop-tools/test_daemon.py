@@ -1,0 +1,376 @@
+#!/usr/bin/env python3
+"""Tests for the always-on daemon, using a fake strap (no Bluetooth, no network).
+
+Run:  .venv/bin/python -m unittest test_daemon -v
+"""
+import asyncio, os, struct, tempfile, types, unittest
+
+_TMP = tempfile.mkdtemp(prefix="whoop-test-")
+os.environ["WHOOP_DB"] = os.path.join(_TMP, "test.db")
+
+import db, whoop, collector, daemon, decode  # noqa: E402
+
+collector.LIVE_LOCK = daemon.LOCK = os.path.join(_TMP, ".live.lock")
+
+
+def console(text, rtc=1):
+    """A CONSOLE_LOGS frame as the strap sends it: 3 header + 7 prefix bytes + text."""
+    return bytes([0x32, 0, 0]) + struct.pack("<I", rtc) + b"\x00\x00\x00" + text
+
+
+def metadata(sub, trim=0):
+    return bytes([0x31, 0, sub]) + b"\x00" * 10 + struct.pack("<I", trim)
+
+
+class FakeStrap:
+    """Stands in for whoop.Whoop: emits 1 Hz-style live frames and a drain batch."""
+    made = []
+    hrs = [61, 0, 62, 63]            # one off-wrist zero in the stream
+    drop_after = None                # live frames before the link "drops"
+
+    def __init__(self, addr):
+        self.addr = addr
+        self.client = types.SimpleNamespace(is_connected=True)
+        self.on_realtime = self.raw_sink = None
+        self.drains = self.sent = 0
+        self.realtime_on = 0
+        self._task = None
+        FakeStrap.made.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        if self._task:
+            self._task.cancel()
+
+    async def init(self):
+        pass
+
+    async def realtime(self, on=True):
+        if on:
+            self.realtime_on += 1
+            if not self._task:
+                self._task = asyncio.ensure_future(self._emit())
+
+    async def _emit(self):
+        while self.client.is_connected:
+            hr = self.hrs[self.sent % len(self.hrs)]
+            self.raw_sink(whoop.CH_DATA, bytes([whoop.T_REALTIME]) + b"\x00" * 19)
+            self.on_realtime({"ts": 31_500_000, "hr": hr, "rr_1024": [1024, 0]})   # strap RTC (whole seconds)
+            self.sent += 1
+            if self.drop_after and self.sent >= self.drop_after:
+                self.client.is_connected = False
+            await asyncio.sleep(0.005)
+
+    async def drain(self, timeout=90):
+        self.drains += 1
+        self.raw_sink(whoop.CH_DATA, metadata(1))
+        self.raw_sink(whoop.CH_DATA, console(b"32, 100: SUPERVISOR: SOC report: 57.25. "))
+        self.raw_sink(whoop.CH_DATA, metadata(2, trim=7))
+        self.raw_sink(whoop.CH_DATA, metadata(3))
+        return True
+
+
+def make(**kw):
+    d = daemon.Daemon(strap=FakeStrap, find=None, addr=lambda: "FAKE-ADDR", **kw)
+    d.jobs = []
+    d.settle, d.tick, d.retry_min, d.retry_max = 0, 0.01, 0.01, 0.02
+    return d
+
+
+async def run_for(d, secs, during=None):
+    task = asyncio.ensure_future(d.run())
+    if during:
+        await during(d)
+    await asyncio.sleep(secs)
+    d.stop.set()
+    return await asyncio.wait_for(task, 5)
+
+
+class DaemonTest(unittest.TestCase):
+    def setUp(self):
+        FakeStrap.made = []
+        FakeStrap.drop_after = None
+        c = db.connect()
+        for t in ("ble_hr", "ble_raw", "clock_sync", "sync_state"):
+            c.execute(f"DELETE FROM {t}")
+        c.commit()
+
+    def test_drains_then_streams_live(self):
+        d = make()
+        self.assertEqual(asyncio.run(run_for(d, 0.3)), 0)
+        c = db.connect()
+        s = FakeStrap.made[0]
+        self.assertEqual(s.drains, 1)                       # drained once on connect
+        hrs = [r["hr"] for r in c.execute("SELECT hr FROM ble_hr")]
+        self.assertGreater(len(hrs), 5)
+        self.assertNotIn(0, hrs)                            # off-wrist zeros are not stored
+        ptypes = [r["ptype"] for r in c.execute("SELECT ptype FROM ble_raw")]
+        self.assertEqual(sorted(ptypes), [0x31, 0x31, 0x31, 0x32])   # drain stored, live frames not
+        clk = c.execute("SELECT rtc, offset FROM clock_sync").fetchall()
+        self.assertEqual(len(clk), 1)                       # one clock mapping per connect
+        self.assertEqual(clk[0]["rtc"], 31_500_000)
+        self.assertIsNotNone(db.get_state(c, "last_ble_sync"))
+        self.assertIn('"hr": null', db.get_state(c, "live_hr_now"))  # marked offline on stop
+        self.assertFalse(os.path.exists(daemon.LOCK))       # lock released
+
+    def test_redrains_on_interval_and_on_request(self):
+        d = make(drain_every=0.05)
+        asyncio.run(run_for(d, 0.3))
+        self.assertGreaterEqual(FakeStrap.made[0].drains, 3)
+
+        FakeStrap.made = []
+        d = make(drain_every=3600)
+
+        async def ask(d):
+            await asyncio.sleep(0.1)
+            d.drain_now.set()                               # what SIGUSR1 / Resync does
+        asyncio.run(run_for(d, 0.2, during=ask))
+        s = FakeStrap.made[0]
+        self.assertEqual(s.drains, 2)
+        self.assertEqual(s.realtime_on, 2)                  # stream re-asserted after each drain
+
+    def test_no_drain_leaves_history_on_the_strap(self):
+        d = make(do_drain=False)
+
+        async def ask(d):
+            await asyncio.sleep(0.05)
+            d.drain_now.set()
+        asyncio.run(run_for(d, 0.2, during=ask))
+        self.assertEqual(FakeStrap.made[0].drains, 0)
+        c = db.connect()
+        self.assertGreater(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 5)
+        self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_raw").fetchone()["n"], 0)
+
+    def test_reconnects_after_the_link_drops(self):
+        FakeStrap.drop_after = 5
+        d = make()
+        asyncio.run(run_for(d, 0.5))
+        self.assertGreaterEqual(len(FakeStrap.made), 3)     # kept coming back
+        self.assertTrue(all(s.drains == 1 for s in FakeStrap.made[:-1]))   # drains on every connect
+        c = db.connect()
+        self.assertGreaterEqual(c.execute("SELECT COUNT(*) n FROM clock_sync").fetchone()["n"], 3)
+
+    def test_reconnects_when_live_data_stalls(self):
+        class Silent(FakeStrap):
+            async def _emit(self):
+                return
+        d = make()
+        d.strap, d.stall = Silent, 0.06
+        asyncio.run(run_for(d, 0.4))
+        self.assertGreaterEqual(len(FakeStrap.made), 2)
+        self.assertGreaterEqual(FakeStrap.made[0].realtime_on, 2)   # nudged before giving up
+
+    def test_abandons_a_drain_when_the_strap_goes_silent(self):
+        class Hangs(FakeStrap):
+            async def drain(self, timeout=90):
+                self.drains += 1
+                await asyncio.sleep(timeout)                 # connected, but nothing ever arrives
+                return False
+        d = make(drain_every=3600)
+        d.strap, d.drain_stall = Hangs, 0.05
+        asyncio.run(run_for(d, 0.4))
+        s = FakeStrap.made[0]
+        self.assertEqual(len(FakeStrap.made), 1)            # link was fine: no needless reconnect
+        self.assertGreaterEqual(s.realtime_on, 1)           # moved on to the live stream quickly
+        c = db.connect()
+        self.assertGreater(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 5)
+
+    def test_dead_link_after_a_silent_drain_reconnects_fast(self):
+        class Dead(FakeStrap):
+            async def drain(self, timeout=90):
+                self.drains += 1
+                await asyncio.sleep(timeout)
+            async def realtime(self, on=True):
+                raise RuntimeError("Service Discovery has not been performed yet")
+        d = make()
+        d.strap, d.drain_stall = Dead, 0.03
+        asyncio.run(run_for(d, 0.5))
+        self.assertGreaterEqual(len(FakeStrap.made), 3)     # noticed within the stall window, kept retrying
+
+    def test_keeps_looking_while_out_of_range(self):
+        calls = []
+
+        async def find():
+            calls.append(1)
+            return None
+        d = make()
+        d.addr, d.find = (lambda: None), find
+        self.assertEqual(asyncio.run(run_for(d, 0.15)), 0)
+        self.assertGreaterEqual(len(calls), 3)
+        self.assertEqual(FakeStrap.made, [])
+
+    def test_housekeeping_runs_on_its_own_timers(self):
+        ran = []
+        d = make()
+        d.addr, d.find = (lambda: None), (lambda: asyncio.sleep(0.01))
+        d.jobs = [("fast", 0, lambda: ran.append("fast")), ("daily", 86400, lambda: ran.append("daily"))]
+        d.nap_real = d.nap
+
+        async def nap(secs, wake_on_drain=False):
+            await d.nap_real(min(secs, 0.02), wake_on_drain)
+        d.nap = nap
+        asyncio.run(run_for(d, 0.2))
+        self.assertEqual(ran.count("daily"), 1)             # not again until tomorrow
+        self.assertGreaterEqual(ran.count("fast"), 2)
+
+    def test_failed_job_is_retried_soon_not_a_day_later(self):
+        ran = []
+        d = make()
+        d.addr, d.find = (lambda: None), (lambda: asyncio.sleep(0.01))
+        d.retry_job = 0.05
+
+        def flaky():                                        # fails once (returns False, as collector.run_* do)
+            ran.append(1)
+            return len(ran) > 1
+        d.jobs = [("backup", 86400, flaky)]
+        d.nap_real = d.nap
+
+        async def nap(secs, wake_on_drain=False):
+            await d.nap_real(min(secs, 0.02), wake_on_drain)
+        d.nap = nap
+        asyncio.run(run_for(d, 0.4))
+        self.assertEqual(len(ran), 2)                       # tried again after retry_job, then left for a day
+
+    def test_second_streamer_refuses_to_start(self):
+        with open(daemon.LOCK, "w") as f:
+            f.write(f"{os.getppid()} daemon")               # a live pid that is not us
+        real, collector.is_streamer = collector.is_streamer, lambda pid: True   # ...and is a daemon
+        try:
+            self.assertEqual(asyncio.run(make().run()), 1)
+            self.assertEqual(FakeStrap.made, [])
+            self.assertTrue(collector.holder_is_daemon())
+        finally:
+            collector.is_streamer = real
+            os.remove(daemon.LOCK)
+
+    def test_lock_naming_an_unrelated_program_is_stale(self):
+        # the pid in the lock is alive but is not daemon.py / live.py (pid reused after a crash):
+        # it must not block the daemon, and must never be sent a signal
+        with open(daemon.LOCK, "w") as f:
+            f.write(f"{os.getppid()} daemon")
+        self.assertFalse(collector.is_streamer(os.getppid()))
+        self.assertIsNone(collector.lock_holder())
+        self.assertFalse(os.path.exists(daemon.LOCK))
+
+    def test_stale_lock_is_cleared(self):
+        child = os.fork()
+        if child == 0:
+            os._exit(0)
+        os.waitpid(child, 0)                                # child is gone: its pid is dead
+        with open(daemon.LOCK, "w") as f:
+            f.write(f"{child} daemon")
+        self.assertIsNone(collector.lock_holder())
+        self.assertFalse(os.path.exists(daemon.LOCK))
+
+
+class DecodeTest(unittest.TestCase):
+    LINES = [b"32, %d: SUPERVISOR: SOC report: %d.50. " % (1000 + i, 40 + i) for i in range(12)] + \
+            [b"31, 2000: BLE: connected. ", b"32, 2001: Flash: page 12, 34 written. "]
+
+    def frames(self):
+        """Log text cut at awkward points, with a marker split across two frames."""
+        stream = b"".join(l[:9] + decode.MARK + l[9:] for l in self.LINES)
+        cuts = [0, 7, 10, 11, 40, 41, 97, 150, 151, 152, 260, 333, len(stream)]
+        return [console(stream[a:b]) for a, b in zip(cuts, cuts[1:]) if b > a]
+
+    def load(self, frames, c):
+        for f in frames:
+            c.execute("INSERT INTO ble_raw(ts,channel,ptype,hex) VALUES(?,?,?,?)", (0, "0005", f[0], f.hex()))
+        c.commit()
+
+    def snapshot(self, c):
+        return ([tuple(r) for r in c.execute("SELECT rtc,subsystem,message FROM device_logs ORDER BY rowid")],
+                [tuple(r) for r in c.execute("SELECT rtc,soc_pct FROM device_soc ORDER BY rtc")])
+
+    def test_incremental_matches_full(self):
+        c = db.connect()
+        c.execute("DELETE FROM ble_raw"); c.execute("DELETE FROM sync_state"); c.commit()
+        frames = self.frames()
+        for f in frames:                                    # one frame per run: worst case
+            self.load([f], c)
+            decode.run(quiet=True)
+        self.load([console(b"32, 9999: END: flush. ")], c)  # next line arriving completes the last one
+        decode.run(quiet=True)
+        step = self.snapshot(c)
+        decode.run(full=True, quiet=True)
+        full = self.snapshot(c)
+        self.assertEqual(len(full[0]), len(self.LINES))     # full holds back only the trailing END line
+        self.assertEqual(step, full)
+        self.assertEqual(len(full[1]), 12)
+        decode.run(quiet=True)                              # nothing new: no duplicates
+        self.assertEqual(self.snapshot(c), full)
+
+    @staticmethod
+    def history(ts, hr, rr=()):
+        """A stored-history record (0x2F, version 24): seq, ts, hr and RR at their offsets."""
+        d = bytearray(93)
+        struct.pack_into("<II", d, 0, ts, ts)
+        d[14], d[15] = hr, len(rr)
+        struct.pack_into("<4H", d, 16, *(list(rr) + [0, 0, 0, 0])[:4])
+        return bytes([0x2F, 24, 5]) + bytes(d)
+
+    def test_history_backfills_only_the_gaps(self):
+        c = db.connect()
+        for t in ("ble_raw", "ble_hr", "sync_state"):
+            c.execute(f"DELETE FROM {t}")
+        T = 1_795_000_000
+        for s in (3, 4, 5):                                  # the live stream covered these seconds
+            c.execute("INSERT INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)", (T + s + 0.13, 70, ""))
+        db.set_state(c, "cloud_hr_ts", T + 5.13)             # ...and they were already pushed
+        frames = [self.history(T + s, 60 + s, rr=(1024,)) for s in range(6)]   # strap stored 0..5
+        frames += [self.history(T + 6, 0),                   # off the wrist
+                   self.history(31_500_000, 66)]             # clock never set (1971)
+        self.load(frames, c)
+        decode.run(quiet=True)
+        got = [(r["ts"], r["hr"], r["rr_ms"]) for r in c.execute("SELECT * FROM ble_hr WHERE ts < ? ORDER BY ts", (T + 3,))]
+        self.assertEqual(got, [(T + 0.0, 60, "1000.0"), (T + 1.0, 61, "1000.0"), (T + 2.0, 62, "1000.0")])
+        self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 6)   # 3 live + 3 backfilled
+        self.assertEqual(float(db.get_state(c, "cloud_hr_ts")), T - 1)        # cloud push will pick them up
+        decode.run(full=True, quiet=True)                    # rebuilding adds nothing twice
+        self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 6)
+
+    def test_other_record_versions_are_not_read_as_heart_rate(self):
+        # version 25 is a block of raw sensor samples: byte 14 there is not a heart rate
+        c = db.connect()
+        for t in ("ble_raw", "ble_hr", "sync_state"):
+            c.execute(f"DELETE FROM {t}")
+        T = 1_794_800_000
+        other = bytearray(self.history(T, 138)); other[1] = 25          # would pass as "138 bpm"
+        junk_rr = bytearray(self.history(T + 1, 70)); junk_rr[3 + 15] = 255   # beat count "255": not a count
+        self.load([bytes(other), bytes(junk_rr)], c)
+        decode.run(quiet=True)
+        self.assertEqual([tuple(r) for r in c.execute("SELECT ts,hr,rr_ms FROM ble_hr")], [(T + 1.0, 70, "")])
+        self.assertEqual(int(db.get_state(c, "history_ts")), T + 1)     # how far history has been read
+
+    def test_two_records_in_one_second_are_both_kept(self):
+        # the strap ticks slightly faster than 1 Hz, so some seconds carry two records
+        c = db.connect()
+        for t in ("ble_raw", "ble_hr", "sync_state"):
+            c.execute(f"DELETE FROM {t}")
+        T = 1_794_900_000
+        self.load([self.history(T, 60, rr=(1024,)), self.history(T, 61, rr=(1000,)), self.history(T + 1, 62)], c)
+        decode.run(quiet=True)
+        got = [(r["ts"], r["hr"]) for r in c.execute("SELECT ts,hr FROM ble_hr ORDER BY ts")]
+        self.assertEqual(got, [(T + 0.0, 60), (T + 0.5, 61), (T + 1.0, 62)])
+        decode.run(full=True, quiet=True)                    # and a rebuild doesn't add them again
+        self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 3)
+
+    def test_battery_order_survives_a_strap_reboot(self):
+        # the firmware tick counter restarts at reboot: the newest report then has the smallest rtc
+        c = db.connect()
+        for t in ("ble_raw", "sync_state"):
+            c.execute(f"DELETE FROM {t}")
+        self.load([console(b"32, 900000: SUPERVISOR: SOC report: 40.00. 32, 900001: X: y. ")], c)
+        decode.run(quiet=True)
+        self.load([console(b"32, 120: SUPERVISOR: SOC report: 95.00. 32, 121: X: y. ")], c)   # after reboot + charge
+        decode.run(quiet=True)
+        order = [r["soc_pct"] for r in c.execute("SELECT soc_pct FROM device_soc ORDER BY COALESCE(seen,0), rtc")]
+        self.assertEqual(order[-2:], [40.0, 95.0])
+        import metrics
+        self.assertEqual(metrics.battery(c), 95.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.whoop.daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__WHOOP_TOOLS_DIR__/.venv/bin/python</string>
+    <string>__WHOOP_TOOLS_DIR__/daemon.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>__WHOOP_TOOLS_DIR__</string>
+  <key>EnvironmentVariables</key><dict><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>ThrottleInterval</key><integer>15</integer>
+  <key>StandardOutPath</key><string>__WHOOP_TOOLS_DIR__/daemon.out.log</string>
+  <key>StandardErrorPath</key><string>__WHOOP_TOOLS_DIR__/daemon.err.log</string>
+</dict></plist>

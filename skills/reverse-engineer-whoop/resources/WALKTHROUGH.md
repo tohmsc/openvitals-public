@@ -44,9 +44,26 @@ Claude Code) running on the user's machine. Each step is a checkpoint, not a scr
   a controlled capture (wear it, move on cue, correlate). Don't fabricate labels.
 
 ## 7. Make it durable
-- Localhost dashboard (Flask + SQLite, vendored Chart.js). Hourly launchd collector:
-  drain → decode → API sync → encrypted local backup → Cloudflare D1 push. Always-on
-  dashboard service. Tell the user to save `.backup_key`.
+- Localhost dashboard (Flask + SQLite, static front end, vendored Chart.js). The first
+  version mixed WHOOP's archive scores with today's strap data, which made 17-month-old
+  sleep look like last night. The fix: **Today** is strap data only, the WHOOP API history
+  is an **Archive** behind a calendar, and every archive page says it isn't today.
+- A full-screen **Heart** view that beats on the strap's real RR timing, with a Resync
+  button that runs one collector cycle.
+- Hourly launchd collector: drain → decode → API sync → encrypted local backup → optional
+  Cloudflare D1 push. Always-on dashboard service. Tell the user to save `.backup_key`.
+
+## 8. Prompts that moved the dashboard forward
+> "Can you design the dashboard and the front end to make it very beautiful? And like a
+> professional healthcare monitoring system that was designed by a Silicon Valley design
+> engineer."
+
+> "Make it a full screen application that includes a view that looks like this. Maybe even
+> an exploded view. Show a live pulse or heart beating as well from the data you get."
+
+> "So the only information you have should be from like the last 2 hours. Plus the
+> historicals against a previous baseline, which is fine, but don't make it look as if the
+> historicals are today. There should obviously be a calendar system where it's old data then."
 
 ## What NOT to do
 - Don't claim a shell/root over the UART — it's an RTOS MCU, not Linux.

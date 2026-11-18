@@ -88,13 +88,15 @@ def parse_realtime(inner: bytes):
         return None
     ts = struct.unpack_from("<I", inner, 2)[0]
     hr = inner[8]
-    n = inner[9]
-    rr = [struct.unpack_from("<H", inner, 10 + 2 * i)[0] for i in range(min(n, 4))]
+    n = min(inner[9], 4, (len(inner) - 10) // 2)      # never read past a short frame
+    rr = [struct.unpack_from("<H", inner, 10 + 2 * i)[0] for i in range(n)]
     return {"ts": ts, "hr": hr, "rr_1024": rr}
 
 
 def parse_historical(inner: bytes):
-    # inner=[0x2F][ver][cmd][data...]; data=inner[3:]; V12 fields:
+    # inner=[0x2F][ver][cmd][data...]; data=inner[3:]. One record per second, ts = Unix time.
+    # seq/ts/hr/rr are verified on record version 24 (hr and RR match the live stream);
+    # the fields after rr come from the V12 layout and are not verified for other versions.
     d = inner[3:]
     if len(d) < 24:
         return {"ver": inner[1], "raw": d.hex()}
@@ -133,6 +135,7 @@ class Whoop:
         self.on_historical = None
         self.on_meta = None
         self.raw_sink = None          # optional: called with (channel, inner) for every frame
+        self.verbose = True           # print every response/event (the daemon turns this off)
         self._hist_done = asyncio.Event()
 
     async def __aenter__(self):
@@ -156,7 +159,7 @@ class Whoop:
         return handler
 
     def _dispatch(self, ch, inner):
-        if not inner:
+        if len(inner) < 3:            # too short to carry a type, sequence and command
             return
         if self.raw_sink:
             self.raw_sink(ch, inner)
@@ -175,9 +178,9 @@ class Whoop:
                 asyncio.create_task(self._ack(m["trim"]))
             if m["subtype"] == 3:                              # COMPLETE
                 self._hist_done.set()
-        elif t == T_CMD_RESP:
+        elif t == T_CMD_RESP and self.verbose:
             print(f"  [resp op=0x{inner[2]:02x}] {inner[3:].hex(' ')}")
-        elif t == T_EVENT:
+        elif t == T_EVENT and self.verbose:
             print(f"  [event #{inner[2]}] {inner[3:].hex(' ')}")
 
     async def send(self, frame):
@@ -214,7 +217,10 @@ class Whoop:
         try:
             await asyncio.wait_for(self._hist_done.wait(), timeout)
         except asyncio.TimeoutError:
-            print("  (drain timed out — may just mean no/!more stored data)")
+            if self.verbose:
+                print("  (drain timed out — may just mean no/!more stored data)")
+            return False
+        return True
 
 
 # ------------------------- CLI -------------------------

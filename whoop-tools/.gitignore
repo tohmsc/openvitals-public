@@ -2,7 +2,10 @@
 .env
 .tokens.json
 *.db
+*.db-wal
+*.db-shm
 *.csv
+!templates/*.csv
 *.log
 *.ndjson
 __pycache__/
@@ -13,3 +16,5 @@ d1_batches/
 history_*.json
 data/
 *.lock
+.dash_password
+.venv

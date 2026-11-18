@@ -1,0 +1,3 @@
+start,end,sport,strain,avg_hr,max_hr,kilojoules,distance_m
+2025-01-01T17:30:00,2025-01-01T18:15:00,running,12.3,148,176,2400,7800
+2025-01-02T12:00:00,2025-01-02T13:00:00,strength,9.6,121,159,1700,
