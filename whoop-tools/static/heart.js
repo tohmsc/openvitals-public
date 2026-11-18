@@ -185,7 +185,6 @@
     const today = isToday();
     stage.dataset.period = today ? "today" : "archive";
     const recent = (LIVE?.recent || []).filter((x) => x.hr);
-    const lastHr = liveNow ? LIVE.hr : recent.at(-1)?.hr;
     const lastTs = LIVE?.ts ? LIVE.ts * 1000 : recent.at(-1)?.ts * 1000;
     const hrTag = liveNow ? ["Live", "live"] : [lastTs ? `Last reading ${ago(lastTs)}` : "No signal", ""];
     let content;
@@ -194,7 +193,7 @@
       const T = window.VITALS?.today, B = window.VITALS?.baseline;
       const vs = (b, unit) => (b?.mean ? `Usual ${fmt(b.mean)} ${unit}` : "No baseline yet");
       content = {
-        hr: [fmt(lastHr), "bpm", "Heart rate now", hrTag],
+        hr: [fmt(hrNow), "bpm", "Heart rate now", hrTag],
         hrv: [fmt(T?.rmssd), "ms", "HRV today", [T?.rmssd ? vs(B?.hrv, "ms at night") : `${T?.nRR || 0} beat intervals so far`, ""]],
         spo2: [fmt(T?.avg), "bpm", "Average today", [T ? vs(B?.avgHr, "bpm") : "No data yet", ""]],
         rhr: [fmt(T?.min), "bpm", "Lowest today", [vs(B?.rhr, "bpm resting"), ""]],
@@ -247,7 +246,7 @@
     }
     const total = Object.values(DATA.counts || {}).reduce((a, b) => a + b, 0);
     $("#hv-count").textContent = n0.format(total);
-    canvas.setAttribute("aria-label", `Animated heart${lastHr ? ` beating at ${lastHr} beats per minute` : ""}.`);
+    canvas.setAttribute("aria-label", `Animated heart${hrNow ? ` beating at ${hrNow} beats per minute` : ""}.`);
   }
 
   /* ───────── Timeline ───────── */
@@ -320,10 +319,10 @@
     LIVE = e.detail;
     liveNow = !!LIVE.live;
     const recent = (LIVE.recent || []).filter((x) => x.hr);
-    hrNow = liveNow ? LIVE.hr : recent.at(-1)?.hr ?? null;
+    hrNow = window.VITALS.currentHr(LIVE); // null once the last reading is no longer fresh: the heart stops rather than beat on an old number
     if (liveNow && LIVE.rr_ms?.length) rrQueue = LIVE.rr_ms.slice(0, 4);
     $("#hv-pulse-state").textContent = liveNow ? "Live pulse" : hrNow ? "Offline" : "No signal";
-    $("#hv-pulse-meta").textContent = hrNow ? `${hrNow} bpm${liveNow && LIVE.rr_ms?.[0] ? ` · RR ${Math.round(LIVE.rr_ms[0])} ms` : liveNow ? "" : " · last"}` : "";
+    $("#hv-pulse-meta").textContent = hrNow ? `${hrNow} bpm${liveNow && LIVE.rr_ms?.[0] ? ` · RR ${Math.round(LIVE.rr_ms[0])} ms` : liveNow ? "" : ` · ${ago(recent.at(-1).ts * 1000)}`}` : "";
     stage.dataset.live = String(liveNow);
     if (wasLive !== liveNow) { wasLive = liveNow; }
     renderCallouts();
