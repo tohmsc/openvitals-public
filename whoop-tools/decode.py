@@ -117,7 +117,8 @@ def _run(c, full, quiet, force):
         if not m:
             continue
         rtc, subsys, msg = int(m.group(1)), m.group(2), m.group(3).strip(" .")
-        c.execute("INSERT INTO device_logs(rtc,subsystem,message) VALUES(?,?,?)", (rtc, subsys, msg))
+        # the strap re-sends log lines after a reconnect; a repeat must not stop the decode
+        c.execute("INSERT OR IGNORE INTO device_logs(rtc,subsystem,message) VALUES(?,?,?)", (rtc, subsys, msg))
         logs += 1
         sm = SOC_RE.search(msg)
         if sm:

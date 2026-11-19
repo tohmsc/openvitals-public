@@ -8,6 +8,10 @@ One long-running process replaces the hourly collector and live.py:
                      another drain every --drain-every seconds
   link drops      -> (walked away, laptop slept, strap rebooted) keep looking and
                      reconnect; the strap keeps recording on its own in the meantime
+  Mac wakes       -> drop the old link at once and connect fresh; if the strap still
+                     can't be reached a couple of minutes later, restart the process
+                     (macOS Bluetooth can stay broken inside a process after a sleep)
+  anything hangs  -> a watchdog thread restarts the process (see Daemon._restart)
   on timers       -> WHOOP API sync (hourly), decode (5 min), backup (daily),
                      cloud push (hourly), raw-frame archive to R2 + local cleanup (hourly),
                      daily health summary to Telegram
@@ -22,7 +26,7 @@ Run:  python daemon.py                 # Ctrl-C to stop
       python daemon.py --no-cloud      # a separate cloud_sync job handles the cloud push
 Keep it running with launchd: see com.whoop.daemon.plist.
 """
-import argparse, asyncio, json, os, signal, sys, time
+import argparse, asyncio, contextlib, json, os, signal, sys, threading, time
 import db, whoop, collector
 
 LOCK = collector.LIVE_LOCK
@@ -66,6 +70,21 @@ class Daemon:
         self.retry_min, self.retry_max = 5, 30
         self.retry_job = 300       # a failed housekeeping job runs again after this long
         self.tick = 1.0
+        # CoreBluetooth calls (scan, connect, notify setup, writes, disconnect) can wait
+        # forever after the Mac sleeps. Each gets a time limit; past it the attempt is
+        # dropped and the main loop tries again.
+        self.find_timeout = 60
+        self.link_timeout = 60
+        # Staying reconnectable. time.monotonic() stops while the Mac sleeps and
+        # time.time() doesn't, so a jump in their difference means the Mac was asleep.
+        self.slept_min = 30        # a clock jump this big (s) counts as a sleep
+        self.wake_grace = 120      # after a wake the strap must be linked within this long,
+        self.idle_restart = 1800   # otherwise within this long of the last link
+        self.watchdog = 300        # main loop silent this long = stuck: restart
+        self.heartbeat = time.monotonic()
+        self.reconnect_by = self.heartbeat + self.idle_restart
+        self._skew = time.time() - time.monotonic()
+        self.restart = self._restart
         self.c = None
         self.stop = asyncio.Event()
         self.drain_now = asyncio.Event()
@@ -73,6 +92,44 @@ class Daemon:
         self.last_rt = 0.0
         self.offset = None         # wall - strap RTC, as last recorded
         self._said = None
+
+    # ---------------- staying reconnectable ----------------
+    def beat(self):
+        self.heartbeat = time.monotonic()
+
+    def slept(self):
+        """Seconds the Mac was asleep since the last call (0 if it wasn't)."""
+        skew = time.time() - time.monotonic()
+        gap, self._skew = skew - self._skew, skew
+        return gap if gap > self.slept_min else 0
+
+    def _restart(self, why):
+        """Replace this process with a fresh copy of itself (same pid, so the lock stays ours).
+
+        A new process gets a new CoreBluetooth manager. That is what cured the stuck
+        state seen after an overnight sleep (2026-11-19): the old process sat idle for
+        8 hours with the strap advertising next to it; a restart connected in 3 s.
+        """
+        log(f"{why} — restarting the daemon")
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except OSError as ex:
+            log("restart failed:", ex)
+            os._exit(75)               # launchd's KeepAlive starts a new one
+
+    def _watch(self):
+        """Watchdog thread: if the main loop stops beating, restart the process.
+
+        It runs outside the event loop, so it still works when the loop is stuck in a
+        call that never returns. Monotonic time pauses while the Mac sleeps, so a long
+        sleep doesn't trip it.
+        """
+        while not self.stop.is_set():
+            time.sleep(min(10, self.watchdog / 4))
+            quiet = time.monotonic() - self.heartbeat
+            if quiet > self.watchdog and not self.stop.is_set():
+                self.restart(f"main loop stuck for {int(quiet)}s")
+                return
 
     def say(self, msg):
         """Log a status line once, not on every retry."""
@@ -136,6 +193,7 @@ class Daemon:
         quiet = False
         while not task.done():
             await asyncio.wait({task}, timeout=self.tick)
+            self.beat()
             quiet = time.monotonic() - self.last_frame > self.drain_stall
             if quiet or self.stop.is_set() or not w.client.is_connected:
                 task.cancel()
@@ -148,10 +206,34 @@ class Daemon:
             log(f"strap silent for {self.drain_stall}s during a drain — checking the link")
         return not quiet
 
-    async def session(self, addr):
-        async with self.strap(addr) as w:
+    async def _ble(self, coro):
+        """Await one Bluetooth step with a time limit (raises TimeoutError past it)."""
+        return await asyncio.wait_for(coro, self.link_timeout)
+
+    async def _close(self, w):
+        try:
+            await self._ble(w.__aexit__(None, None, None))
+        except Exception:
+            pass
+
+    @contextlib.asynccontextmanager
+    async def _link(self, addr):
+        """Connect and run the init handshake, each with a time limit; always disconnect."""
+        w = self.strap(addr)
+        try:
+            await self._ble(w.__aenter__())
             w.verbose = False
-            await w.init()
+            await self._ble(w.init())
+        except BaseException:
+            await self._close(w)
+            raise
+        try:
+            yield w
+        finally:
+            await self._close(w)
+
+    async def session(self, addr):
+        async with self._link(addr) as w:
             await asyncio.sleep(self.settle)
             self.say(f"connected to {addr}")
             sink = collector.raw_sink_for(self.c, skip=(whoop.T_REALTIME,))  # live HR goes to ble_hr
@@ -167,7 +249,14 @@ class Daemon:
             self.last_rt = time.monotonic()
             next_drain = 0.0
             streaming = nudged = False
+            self.reconnect_by = None           # linked: no restart needed
+            asleep = 0
             while not self.stop.is_set() and w.client.is_connected:
+                self.beat()
+                asleep = self.slept()
+                if asleep:
+                    log(f"Mac was asleep for {asleep / 60:.0f} min — reconnecting to the strap")
+                    break
                 due = self.drain_now.is_set() or time.monotonic() >= next_drain
                 self.drain_now.clear()
                 if due and self.do_drain:          # --no-drain also ignores Resync's request
@@ -178,7 +267,7 @@ class Daemon:
                 if self.stop.is_set():
                     break
                 if not streaming:
-                    await w.realtime(True)
+                    await self._ble(w.realtime(True))
                     streaming, nudged = True, False
                     self.last_rt = time.monotonic()
                 quiet = time.monotonic() - self.last_rt
@@ -186,13 +275,15 @@ class Daemon:
                     log(f"no live data for {int(quiet)}s — reconnecting")
                     break
                 if quiet > self.stall / 3 and not nudged:
-                    await w.realtime(True)         # one nudge before giving up on the link
+                    await self._ble(w.realtime(True))   # one nudge before giving up on the link
                     nudged = True
                 elif quiet < self.tick * 2:
                     nudged = False
                 await self.nap(self.tick, wake_on_drain=True)
+            # after a wake the next link must come quickly; otherwise allow idle_restart
+            self.reconnect_by = time.monotonic() + (self.wake_grace if asleep else self.idle_restart)
             try:
-                await w.realtime(False)
+                await self._ble(w.realtime(False))
             except Exception:
                 pass
 
@@ -237,12 +328,24 @@ class Daemon:
         loop.add_signal_handler(signal.SIGUSR1, self.drain_now.set)
         log(f"daemon up (pid {os.getpid()}), db {db.DB_PATH}")
         chores = asyncio.ensure_future(self.housekeeping())
+        if self.watchdog:
+            threading.Thread(target=self._watch, name="watchdog", daemon=True).start()
         wait = self.retry_min
         try:
             while not self.stop.is_set():
+                self.beat()
                 t0 = time.monotonic()
+                if self.slept():
+                    wait = self.retry_min          # look right away, and give it wake_grace
+                    self.reconnect_by = min(self.reconnect_by or t0 + self.wake_grace,
+                                            t0 + self.wake_grace)
+                if self.reconnect_by and t0 > self.reconnect_by:
+                    self.reconnect_by = t0 + self.idle_restart   # if restart() returns (tests)
+                    self.restart("no strap link since the Mac woke or for 30 min")
+                    if self.stop.is_set():
+                        break
                 try:
-                    addr = self.addr() or await self._or_stop(self.find())
+                    addr = self.addr() or await self._or_stop(asyncio.wait_for(self.find(), self.find_timeout))
                     if addr:
                         await self.session(addr)
                         if not self.stop.is_set():
@@ -250,7 +353,9 @@ class Daemon:
                     else:
                         self.say("strap not in range — will connect when it shows up")
                 except Exception as ex:
-                    self.say(f"strap not reachable ({ex}) — retrying")
+                    self.say(f"strap not reachable ({ex or type(ex).__name__}) — retrying")
+                if self.reconnect_by is None:      # left a session: count from now
+                    self.reconnect_by = time.monotonic() + self.idle_restart
                 self.mark_offline()
                 # a link that lasted resets the backoff; quick failures stretch it
                 wait = self.retry_min if time.monotonic() - t0 > 60 else min(wait * 2, self.retry_max)

@@ -98,6 +98,10 @@ def run_api():
         except Exception as ex:
             print("API sync error:", ex)
             return False
+    elif config.env().get("WHOOP_CLIENT_ID"):
+        # set up for the API but never logged in here (or the login didn't move along with
+        # an install): say so in the log, which is where someone looks when scores stop
+        print("WHOOP API: not logged in here, so no sync. Run: python whoop_api.py login")
     return True
 
 def run_decode(quiet=False):

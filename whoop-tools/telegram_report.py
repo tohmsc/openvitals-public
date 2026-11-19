@@ -65,8 +65,12 @@ def configured():
 
 
 def call(token, method, **params):
-    r = requests.post(API.format(token, method), json=params, timeout=30)
-    j = r.json()
+    try:
+        r = requests.post(API.format(token, method), json=params, timeout=30)
+        j = r.json()
+    except Exception as ex:
+        # requests puts the URL, and so the bot token, in its messages: keep it out of logs
+        raise RuntimeError(f"Telegram {method}: {str(ex).replace(token, '<token>')}") from None
     if not j.get("ok"):
         raise RuntimeError(f"Telegram {method}: {j.get('description')}")
     return j["result"]

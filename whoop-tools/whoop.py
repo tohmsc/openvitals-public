@@ -22,6 +22,14 @@ CH_RESP, CH_EVENT, CH_DATA, CH_7 = (BASE.format(n) for n in (3, 4, 5, 7))
 HR_CHAR = "00002a37-0000-1000-8000-00805f9b34fb"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Hard limits on every Bluetooth call. Bleak waits on CoreBluetooth callbacks with no
+# timeout of its own in several places (a write, a disconnect, cancelling a connect
+# attempt). After the Mac sleeps, such a callback can simply never come, and the caller
+# would wait forever. With these limits a stuck call raises TimeoutError instead.
+CONNECT_TIMEOUT = 45      # connect + subscribe to the four notify channels
+WRITE_TIMEOUT = 10
+DISCONNECT_TIMEOUT = 10
+
 # ---- packet types ----
 T_COMMAND, T_CMD_RESP, T_REALTIME = 0x23, 0x24, 0x28
 T_HISTORICAL, T_EVENT, T_METADATA, T_CONSOLE = 0x2F, 0x30, 0x31, 0x32
@@ -139,14 +147,21 @@ class Whoop:
         self._hist_done = asyncio.Event()
 
     async def __aenter__(self):
+        try:
+            await asyncio.wait_for(self._connect(), CONNECT_TIMEOUT)
+        except BaseException:
+            await self.__aexit__()     # don't leave a half-open link behind
+            raise
+        return self
+
+    async def _connect(self):
         await self.client.connect()
         for ch in (CH_RESP, CH_EVENT, CH_DATA, CH_7):
             await self.client.start_notify(ch, self._mk(ch))
-        return self
 
     async def __aexit__(self, *a):
         try:
-            await self.client.disconnect()
+            await asyncio.wait_for(self.client.disconnect(), DISCONNECT_TIMEOUT)
         except Exception:
             pass
 
@@ -184,7 +199,8 @@ class Whoop:
             print(f"  [event #{inner[2]}] {inner[3:].hex(' ')}")
 
     async def send(self, frame):
-        await self.client.write_gatt_char(CMD_CHAR, frame, response=False)
+        await asyncio.wait_for(self.client.write_gatt_char(CMD_CHAR, frame, response=False),
+                               WRITE_TIMEOUT)
 
     async def _ack(self, trim):
         await self.send(cmd(C_HIST_ACK, struct.pack("<BII", 1, trim, 0)))
