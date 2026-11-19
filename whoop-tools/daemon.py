@@ -27,7 +27,7 @@ Run:  python daemon.py                 # Ctrl-C to stop
 Keep it running with launchd: see com.whoop.daemon.plist.
 """
 import argparse, asyncio, contextlib, json, os, signal, sys, threading, time
-import db, whoop, collector
+import db, whoop, collector, alarm
 
 LOCK = collector.LIVE_LOCK
 
@@ -53,6 +53,9 @@ class Daemon:
         # seconds between housekeeping runs; last-run times persist in sync_state
         self.jobs = [("decode", 300, lambda: collector.run_decode(quiet=True)),
                      ("sleep", 300, collector.run_sleep),                                # after decode
+                     ("signals", 600, collector.run_signals),                   # after sleep: skin temp per night
+                     ("stress", 300, collector.run_stress),                     # after sleep: skips sleep
+                     ("scores", 600, collector.run_scores),                     # after decode: uses its heart rate
                      ("backup", 86400, lambda: collector.run_backup(keep=7))]   # a week of dailies
         if do_cloud:
             self.jobs.append(("cloud", 3600, collector.run_cloud))
@@ -93,6 +96,9 @@ class Daemon:
         self.last_rt = 0.0
         self.offset = None         # wall - strap RTC, as last recorded
         self._said = None
+        self.seg = None            # host_log segment being written: [state, start, last seen, last written]
+        self.alarm_retry = 60      # a strap alarm that did not take is tried again after this long
+        self._alarm_next = 0.0
 
     # ---------------- staying reconnectable ----------------
     def beat(self):
@@ -102,7 +108,43 @@ class Daemon:
         """Seconds the Mac was asleep since the last call (0 if it wasn't)."""
         skew = time.time() - time.monotonic()
         gap, self._skew = skew - self._skew, skew
-        return gap if gap > self.slept_min else 0
+        if gap > self.slept_min:
+            self._close_seg()
+            now = time.time()
+            self._log_seg("asleep", now - gap, now)
+            return gap
+        return 0
+
+    # ---------------- what the laptop was doing (host_log) ----------------
+    def _log_seg(self, state, start, end):
+        if self.c is None:
+            return
+        try:
+            self.c.execute("INSERT OR REPLACE INTO host_log(start,end,state) VALUES(?,?,?)", (start, end, state))
+            self.c.commit()
+        except Exception as ex:
+            log("host log write error:", ex)
+
+    def _close_seg(self):
+        if self.seg:
+            self._log_seg(self.seg[0], self.seg[1], self.seg[2])
+            self.seg = None
+
+    def track(self, state):
+        """Note that the laptop is in `state` ('linked' or 'searching') right now. Written about
+        once a minute; a pause of more than 90 s (asleep, or the process stuck) ends the segment,
+        so a hole in host_log means nobody was watching."""
+        now = time.time()
+        s = self.seg
+        if s and s[0] == state and now - s[2] < 90:
+            s[2] = now
+            if now - s[3] >= 60:
+                s[3] = now
+                self._log_seg(state, s[1], now)
+            return
+        self._close_seg()
+        self.seg = [state, now, now, now]
+        self._log_seg(state, now, now)
 
     def _restart(self, why):
         """Replace this process with a fresh copy of itself (same pid, so the lock stays ours).
@@ -162,11 +204,64 @@ class Daemon:
         except Exception as ex:        # never let a DB hiccup kill the BLE callback
             log("live write error:", ex)
 
+    def on_battery(self, pct, key="battery_now"):
+        """The strap's answer to GetBatteryLevel: the one strap battery reading that is current.
+        With key="pack_battery_now": the Battery Level characteristic (likely the battery pack)."""
+        try:
+            db.set_state(self.c, key, json.dumps({"soc": pct, "ts": time.time(), "src": "strap"}))
+        except Exception as ex:
+            log("battery write error:", ex)
+
+    async def read_batteries(self, w):
+        await self._ble(w.battery())           # the strap's answer arrives via on_battery
+        try:
+            pack = await self._ble(w.pack_battery())
+        except Exception as ex:                # optional: never drop the link over it
+            log("battery pack read failed:", ex)
+            return
+        if pack is not None:
+            self.on_battery(pack, "pack_battery_now")
+
     def mark_offline(self):
         try:
             db.set_state(self.c, "live_hr_now", json.dumps({"hr": None, "ts": time.time()}))
         except Exception as ex:
             log("state write error:", ex)
+
+    # ---------------- buzz / alarm requests (alarm.py) ----------------
+    def on_event(self, eid, inner):
+        if eid in whoop.EVENT_NAMES:
+            try:
+                alarm.note_event(self.c, eid)
+                log(f"strap: {whoop.EVENT_NAMES[eid]}")
+            except Exception as ex:
+                log("event write error:", ex)
+
+    async def strap_jobs(self, w):
+        """Run queued buzz requests and keep the strap's alarm in step. Called every tick.
+        A Bluetooth time-out ends the session (reconnect); any other error is only logged,
+        so a bad request can never stop the live stream."""
+        try:
+            await self._strap_jobs(w)
+        except (asyncio.TimeoutError, TimeoutError):
+            raise
+        except Exception as ex:
+            log("strap request error:", ex)
+            self._alarm_next = time.time() + self.alarm_retry
+
+    async def _strap_jobs(self, w):
+        poke = await alarm.run_requests(w, self.c)
+        now = time.time()
+        if alarm.ring_due(self.c, now):            # strap didn't confirm its alarm: ring it ourselves
+            alarm.mark_rang(self.c, now)
+            r = await self._ble(w.run_alarm())
+            log("alarm time: rang the strap from the daemon" + ("" if r else " (no answer)"))
+        if (poke or now >= self._alarm_next) and alarm.due_for_sync(self.c, now):
+            msg = await self._ble(alarm.sync(w, self.c, now))
+            if msg:
+                log(msg)
+            ok = alarm.armed(self.c).get("ok") or alarm.desired(alarm.get(self.c), now) is None
+            self._alarm_next = now + (0 if ok else self.alarm_retry)
 
     # ---------------- one connection ----------------
     async def _or_stop(self, coro):
@@ -246,6 +341,8 @@ class Daemon:
                 sink(ch, inner)
             w.raw_sink = counted
             w.on_realtime = self.on_realtime
+            w.on_battery = self.on_battery
+            w.on_event = self.on_event
             self.offset = None
             self.last_rt = time.monotonic()
             next_drain = 0.0
@@ -254,7 +351,14 @@ class Daemon:
             asleep = 0
             while not self.stop.is_set() and w.client.is_connected:
                 self.beat()
+                # Events and command replies go into ble_raw without a commit, and the live
+                # stream (which commits) pauses while the strap vibrates. An open write would
+                # then block the dashboard's and CLI's requests for up to 20 s (seen on the
+                # real strap), so close it every tick.
+                self.c.commit()
                 asleep = self.slept()
+                if not asleep:
+                    self.track("linked")
                 if asleep:
                     log(f"Mac was asleep for {asleep / 60:.0f} min — reconnecting to the strap")
                     break
@@ -262,11 +366,14 @@ class Daemon:
                 self.drain_now.clear()
                 if due and self.do_drain:          # --no-drain also ignores Resync's request
                     ok = await self.drain(w)
+                    if ok:
+                        await self.read_batteries(w)
                     # an abandoned drain is retried soon, not a full interval later
                     next_drain = time.monotonic() + (self.drain_every if ok else min(60, self.drain_every))
                     streaming = False              # re-assert the stream after every drain
                 if self.stop.is_set():
                     break
+                await self.strap_jobs(w)           # queued buzzes, the strap's alarm
                 if not streaming:
                     await self._ble(w.realtime(True))
                     streaming, nudged = True, False
@@ -340,6 +447,7 @@ class Daemon:
                     wait = self.retry_min          # look right away, and give it wake_grace
                     self.reconnect_by = min(self.reconnect_by or t0 + self.wake_grace,
                                             t0 + self.wake_grace)
+                self.track("searching")
                 if self.reconnect_by and t0 > self.reconnect_by:
                     self.reconnect_by = t0 + self.idle_restart   # if restart() returns (tests)
                     self.restart("no strap link since the Mac woke or for 30 min")
@@ -358,11 +466,13 @@ class Daemon:
                 if self.reconnect_by is None:      # left a session: count from now
                     self.reconnect_by = time.monotonic() + self.idle_restart
                 self.mark_offline()
+                self.track("searching")
                 # a link that lasted resets the backoff; quick failures stretch it
                 wait = self.retry_min if time.monotonic() - t0 > 60 else min(wait * 2, self.retry_max)
                 await self.nap(wait)
         finally:
             chores.cancel()
+            self._close_seg()
             self.mark_offline()
             try:
                 os.remove(LOCK)

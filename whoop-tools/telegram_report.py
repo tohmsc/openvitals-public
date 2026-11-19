@@ -19,7 +19,9 @@ has handed over the night, instead of reporting "no data" a minute after you ope
 
 Nudges, sent once when they start (never between 22:00 and the morning hour):
   battery under 20% · strap charged again · strap not seen for 6 hours · strap back ·
-  strap clock reset (it stops storing history) · cloud archive stuck for days
+  strap clock reset (it stops storing history) · cloud archive stuck for days ·
+  health alerts (alerts.py: resting HR up, HRV down, short sleep, breathing rate up, very low
+  recovery, each 3 clean nights in a row against your usual; once per episode)
 
 Commands you can send the bot:  /status  (is everything running)  ·  /now  (today so far)
   /good · /ok · /rough  (how you feel today: the calls are tuned to your answers, see learn.py)
@@ -41,7 +43,7 @@ encrypted). Only these short messages are sent, never raw data.
 """
 import json, os, secrets, sys, time
 import requests
-import config, db, learn, metrics, sleep
+import alerts, config, db, learn, metrics, sleep
 from metrics import day_stats, night_stats, day_bounds, battery      # noqa: F401 (also used by tests)
 
 HERE = config.HERE
@@ -180,10 +182,45 @@ def compose(c, start, end, label, morning):
             bullets.append(f"{when} was a calm one: avg HR {day['avg']:.0f}, never above {day['max']}.{short}")
         else:
             bullets.append(f"{when} was a normal day: avg HR {day['avg']:.0f}, peak {day['max']}.{short}")
+    if label == "Yesterday":
+        try:
+            held = held_back_line(c, morning)
+        except Exception as ex:                       # the message goes out without it
+            print("coverage error:", ex)
+            held = None
+        if held:
+            bullets.append(held)
     soc = battery(c)
     if soc is not None and soc < 30:
         bullets.append(f"Strap battery {soc:.0f}%, charge it today.")
     return f"{DOT[state]} {head}\n\n" + "\n".join("• " + b for b in bullets)
+
+
+def held_back_line(c, morning, now=None):
+    """If yesterday's strain estimate was held back for too little heart rate: how much the
+    strap recorded and where the biggest hole was, so it's clear what to change.
+    Uses scores.py's own day window and coverage rule, on the data as it is now."""
+    import scores
+    day = time.strftime("%Y-%m-%d", time.localtime(morning - 43200))
+    if not scores._has(c, "estimates"):
+        return None
+    est = scores._get(c, day, "strain", scores.current(c))
+    if not est or est["ok"]:
+        return None
+    a, b, ongoing = scores.day_window(c, day, now)
+    if ongoing or b <= a:
+        return None
+    share = scores.heart_zones(c, a, b, 50, 200)["recorded_s"] / (b - a)
+    need = scores.GATES["strain_coverage"]
+    if share >= need:
+        return None
+    line = f"Strain held back: the strap recorded {share:.0%} of yesterday (needs {need:.0%})."
+    cov = metrics.coverage(c, a, b, now)
+    if cov["gaps"]:
+        line += f" Biggest gap {metrics.gap_text(cov['gaps'][0])}."
+    if cov["pending_s"] >= 600 and not (cov["gaps"] and cov["gaps"][0]["pending_s"] >= 600):
+        line += " Part of it is still on the strap and comes in at the next sync."
+    return line
 
 
 # ---------------- status + nudges ----------------
@@ -267,6 +304,10 @@ def nudges(c, e, uptime):
         out.append(("archive", late > 72,
                     f"☁️ The cloud archive is {late / 24:.0f} days behind. The Cloudflare login has probably "
                     "expired: run `npx wrangler login` on the laptop. Nothing is lost meanwhile.", None))
+    # health alerts (alerts.py): sent once when an episode starts; quiet while it lasts and
+    # when it ends. A new message only after it has ended and come back.
+    for key, a in alerts.evaluate(c).items():
+        out.append((f"health_{key}", a is not None, alerts.message(a) if a else None, None))
     return out
 
 

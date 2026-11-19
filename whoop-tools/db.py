@@ -35,6 +35,12 @@ CREATE INDEX IF NOT EXISTS idx_ble_raw_ts ON ble_raw(ts);
 CREATE TABLE IF NOT EXISTS clock_sync (
   ts REAL PRIMARY KEY, rtc INTEGER, offset REAL);
 
+-- What the laptop was doing, written by daemon.py: 'linked' (connected to the strap),
+-- 'searching' (awake, strap not connected: out of range or Bluetooth stuck) or 'asleep'.
+-- No row = the daemon wasn't running. metrics.coverage explains gaps in ble_hr with it.
+CREATE TABLE IF NOT EXISTS host_log (
+  start REAL PRIMARY KEY, end REAL NOT NULL, state TEXT NOT NULL);
+
 -- Raw frames that archive.py moved to Cloudflare R2 and removed from ble_raw:
 -- one object per UTC hour (hour = unix time / 3600).
 CREATE TABLE IF NOT EXISTS raw_archive (
@@ -45,16 +51,23 @@ CREATE TABLE IF NOT EXISTS raw_archive (
 -- telegram_report.py uses the recent rows as "your usual".
 -- learn.py adds what the day before looked like, the call it made, and how you said you felt
 -- (feel: 1 rough, 2 ok, 3 good), and learns your usual and your thresholds from these rows.
+-- n_rr: clean beat pairs behind the night's HRV (alerts.py only trusts HRV with enough of them).
 CREATE TABLE IF NOT EXISTS daily_night (date TEXT PRIMARY KEY, rhr REAL, hrv REAL,
   load_s REAL, peak INTEGER, recorded_s REAL, score REAL, call TEXT, feel INTEGER, feel_ts REAL);
 
 CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT);
+
+-- Requests for the strap from other programs (dashboard, CLI). Only the daemon holds the
+-- Bluetooth link, so it runs these on its next tick (alarm.py). status: pending, done,
+-- failed, expired.
+CREATE TABLE IF NOT EXISTS strap_cmd (id INTEGER PRIMARY KEY, ts REAL, kind TEXT, arg TEXT,
+  status TEXT DEFAULT 'pending', result TEXT, done_ts REAL);
 """
 
 # Columns added after a table first shipped: (table, column, type). Added on connect if missing.
 ADDED = [("daily_night", col, typ) for col, typ in (
     ("load_s", "REAL"), ("peak", "INTEGER"), ("recorded_s", "REAL"), ("score", "REAL"),
-    ("call", "TEXT"), ("feel", "INTEGER"), ("feel_ts", "REAL"))]
+    ("call", "TEXT"), ("feel", "INTEGER"), ("feel_ts", "REAL"), ("n_rr", "INTEGER"))]
 
 def add_columns(c, added):
     """ALTER TABLE for each (table, column, type) the database doesn't have yet."""

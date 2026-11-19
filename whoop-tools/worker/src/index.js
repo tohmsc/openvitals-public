@@ -197,6 +197,10 @@ async function ensureSchema(env) {
   await env.DB.batch([
     env.DB.prepare("CREATE TABLE IF NOT EXISTS passkeys (id TEXT PRIMARY KEY, public_key TEXT NOT NULL, alg INTEGER NOT NULL, sign_count INTEGER NOT NULL DEFAULT 0, transports TEXT, device TEXT, created_at REAL, last_used REAL)"),
     env.DB.prepare("CREATE TABLE IF NOT EXISTS passkey_challenges (nonce TEXT PRIMARY KEY, exp REAL NOT NULL)"),
+    // strap score estimates, pushed by cloud_sync.py (here too so a summary before the first push works)
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS estimates (date TEXT, kind TEXT, version TEXT, value REAL, ok INTEGER, why TEXT, row TEXT, inputs TEXT, computed_at REAL, PRIMARY KEY (date, kind, version))"),
+    // stress monitor windows, pushed by cloud_sync.py (stress.py on the Mac)
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS stress (ts REAL PRIMARY KEY, date TEXT, state TEXT, score REAL, hr REAL, rmssd REAL, n_rr INTEGER, move REAL, computed_at REAL)"),
   ]);
   schemaReady = true;
 }
@@ -310,7 +314,8 @@ async function verifyLogin(env, url, body) {
 async function summary(env, url) {
   const since = Number(url.searchParams.get("since")) || Date.now() / 1000 - 86400;
   const DB = env.DB;
-  const [profile, recovery, sleep, cycle, workout, soc, logs, meta, today, arch] = await DB.batch([
+  await ensureSchema(env);
+  const [profile, recovery, sleep, cycle, workout, soc, logs, meta, today, arch, est] = await DB.batch([
     DB.prepare("SELECT value FROM api_profile WHERE key='first_name'"),
     DB.prepare("SELECT created_at,recovery_score,hrv_rmssd_ms,resting_hr,spo2,skin_temp_c FROM api_recovery WHERE recovery_score IS NOT NULL ORDER BY created_at DESC LIMIT ?").bind(HISTORY),
     DB.prepare("SELECT start,end,sleep_perf,sleep_efficiency,sleep_consistency,resp_rate,total_in_bed_ms,total_rem_ms,total_sws_ms,total_light_ms,total_awake_ms,disturbances FROM api_sleep WHERE COALESCE(nap,0)=0 AND total_in_bed_ms IS NOT NULL ORDER BY start DESC LIMIT ?").bind(HISTORY),
@@ -321,6 +326,8 @@ async function summary(env, url) {
     DB.prepare("SELECT key,value FROM meta"),
     DB.prepare("SELECT ts,hr,rr_ms FROM ble_hr WHERE ts >= ? AND hr > 0 ORDER BY ts LIMIT 50000").bind(since),
     DB.prepare("SELECT MIN(created_at) a, MAX(created_at) b FROM api_recovery"),
+    // only the estimates that passed their checks, of the version the Mac says is current
+    DB.prepare("SELECT date, kind, version, ok, why, row, inputs FROM estimates WHERE version = (SELECT value FROM meta WHERE key = 'scores_version') AND (ok = 1 OR date >= date('now', '-14 days')) ORDER BY date DESC LIMIT ?").bind(HISTORY),
   ]);
   const m = Object.fromEntries(meta.results.map((r) => [r.key, r.value]));
   // how you slept (sleep.py on the Mac); the table appears with the first push that has a night
@@ -330,6 +337,26 @@ async function summary(env, url) {
   } catch { /* not pushed yet */ }
   let counts = {};
   try { counts = JSON.parse(m.local_counts || "{}"); } catch { /* ignore */ }
+  // the strap's own answer (daemon.py), not the newest firmware log line: a history drain
+  // replays old logs, so those can be months old
+  const reading = (v) => {
+    try {
+      const b = JSON.parse(v || "null");
+      return b && b.src === "strap" && Date.now() / 1000 - b.ts < 86400 ? b.soc : null;
+    } catch { return null; }
+  };
+  const battery = reading(m.battery_now);
+  const pack_battery = reading(m.pack_battery_now);   // Battery Level characteristic: likely the pack
+  // stress monitor: the newest day the Mac pushed (the app checks it is today)
+  let stress = null;
+  try {
+    const rows = (await DB.prepare("SELECT ts, date, state, score, hr, rmssd FROM stress WHERE date = (SELECT MAX(date) FROM stress) ORDER BY ts").all()).results;
+    if (rows.length) stress = stressFor(rows, JSON.parse(m.stress_baseline || "null"), Date.now() / 1000);
+  } catch { /* not pushed yet */ }
+  let alerts = [];
+  try { alerts = JSON.parse(m.health_alerts || "[]"); } catch { /* ignore */ }
+  let coverage = [];
+  try { coverage = JSON.parse(m.coverage || "[]"); } catch { /* ignore */ }   // metrics.coverage_days on the Mac
   return {
     cloud: true,
     demo: false,
@@ -343,13 +370,55 @@ async function summary(env, url) {
       return { ...w, zones: zones && Object.keys(zones).length ? zones : null };
     }),
     soc: soc.results,
+    battery,
+    pack_battery,
     logs: logs.results,
     today_hr: today.results,
     archive: { start: arch.results[0]?.a ?? null, end: arch.results[0]?.b ?? null },
     nights,
+    estimates: estimates(est.results),
+    stress,
+    alerts,
     sync: { ble: m.last_ble_sync ? Number(m.last_ble_sync) : null, api: m.api_since ?? null, cloud: m.last_cloud_sync ? Number(m.last_cloud_sync) : null },
     counts,
+    coverage,
   };
+}
+
+// Same shape as scores.for_app() on the Mac: rows like the WHOOP tables, marked with `est`.
+function estimates(rows) {
+  const out = { recovery: [], sleep: [], cycle: [], held: [] };
+  const to = { recovery: "recovery", sleep: "sleep", strain: "cycle" };
+  for (const r of rows) {
+    if (!r.ok) { out.held.push({ date: r.date, kind: r.kind, why: r.why }); continue; }
+    let row, inputs;
+    try { row = JSON.parse(r.row); inputs = JSON.parse(r.inputs || "{}"); } catch { continue; }
+    if (to[r.kind]) out[to[r.kind]].push({ ...row, est: r.version, est_date: r.date, basis: inputs.basis ?? null });
+  }
+  return out;
+}
+
+// Same as stress.for_app() / stress.now_value() on the Mac.
+const STRESS_WHY = {
+  asleep: "Asleep.",
+  no_motion: "The strap's movement data for this time hasn't come in yet.",
+  moving: "You're moving, so a raised heart rate says nothing about stress.",
+  active: "Heart rate is in an exercise zone.",
+  settling: "Just stopped moving; heart rate is still settling.",
+  few_beats: "Not enough clean beats to read HRV.",
+};
+const stressLevel = (s) => (s == null ? null : s >= 2 ? "High" : s >= 1 ? "Medium" : "Low");
+function stressFor(rows, baseline, t) {
+  const series = rows.map((r) => ({ ts: r.ts, state: r.state, score: r.score, hr: r.hr, rmssd: r.rmssd == null ? null : Math.round(r.rmssd * 10) / 10 }));
+  const recent = series.filter((w) => w.ts + 300 >= t - 1800 && w.state !== "no_data");
+  const told = recent.filter((w) => w.state !== "no_motion");
+  let now;
+  if (told.length) {
+    const w = told.at(-1);
+    now = { ts: w.ts, state: w.state, score: w.score, level: stressLevel(w.score), why: w.state === "ok" ? null : STRESS_WHY[w.state], pending: recent.at(-1).state === "no_motion" };
+  } else if (recent.length) now = { ts: null, state: "no_motion", score: null, level: null, why: STRESS_WHY.no_motion, pending: true };
+  else now = { ts: null, state: "no_data", score: null, level: null, why: "Nothing from the strap in the last 30 minutes.", pending: false };
+  return { date: rows[0].date, now, baseline, series };
 }
 
 async function live(env) {

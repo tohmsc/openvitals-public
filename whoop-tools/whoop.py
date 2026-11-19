@@ -11,6 +11,8 @@ Protocol (CRC-verified against real captures):
 Packet types: 0x23 COMMAND 0x24 CMD_RESP 0x28 REALTIME 0x2F HISTORICAL
               0x30 EVENT 0x31 METADATA 0x32 CONSOLE
 CLI:  whoop.py info | live | drain
+      whoop.py buzz [pattern] [loops]            vibrate now
+      whoop.py alarm 07:00 [once] | off | show   silent alarm (stored on the strap)
 """
 import asyncio, struct, binascii, sys, time, csv, json, os, datetime as dt
 from bleak import BleakClient, BleakScanner
@@ -20,6 +22,9 @@ BASE = "6108{:04x}-8d6d-82b8-614a-1c8cb0f8dcc6"
 CMD_CHAR = BASE.format(2)
 CH_RESP, CH_EVENT, CH_DATA, CH_7 = (BASE.format(n) for n in (3, 4, 5, 7))
 HR_CHAR = "00002a37-0000-1000-8000-00805f9b34fb"
+# Standard Battery Level. It does not match the strap's own gauge (56% while GetBatteryLevel
+# said 100.0% on the charger), so it is most likely the slide-on battery pack. Not yet proven.
+PACK_CHAR = "00002a19-0000-1000-8000-00805f9b34fb"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Hard limits on every Bluetooth call. Bleak waits on CoreBluetooth callbacks with no
@@ -38,6 +43,17 @@ C_HELLO_HARVARD, C_VERSION, C_TOGGLE_HR = 0x23, 0x07, 0x0E
 C_REALTIME_HR, C_SET_CLOCK, C_GET_CLOCK = 0x03, 0x0A, 0x0B
 C_ABORT_HIST, C_SEND_HIST, C_HIST_ACK = 0x14, 0x16, 0x17
 C_BATTERY, C_GET_NAME, C_HIGHFREQ_ON = 0x1A, 0x4C, 0x60
+# Haptics and the strap's own alarm. Opcode numbers and payloads come from community
+# reverse-engineering (sources and results in README "Silent alarm") and were then tried on
+# a real WHOOP 4.0. STOP_HAPTICS is answered with status 3 and does not stop a buzz.
+C_SET_ALARM, C_GET_ALARM, C_RUN_ALARM, C_DISABLE_ALARM = 0x42, 0x43, 0x44, 0x45   # 66..69
+C_RUN_HAPTICS, C_STOP_HAPTICS = 0x4F, 0x7A                                         # 79, 122
+# ---- event ids (inner[2] of a type 0x30 EVENT frame) ----
+E_ALARM_SET, E_ALARM_FIRED, E_APP_ALARM, E_ALARM_DISABLED = 56, 57, 58, 59
+E_HAPTICS_FIRED, E_HAPTICS_ENDED = 60, 100
+EVENT_NAMES = {E_ALARM_SET: "alarm set", E_ALARM_FIRED: "alarm fired (strap)",
+               E_APP_ALARM: "alarm fired (app)", E_ALARM_DISABLED: "alarm disabled",
+               E_HAPTICS_FIRED: "haptics fired", E_HAPTICS_ENDED: "haptics ended"}
 
 
 def crc8(d: bytes) -> int:
@@ -101,10 +117,26 @@ def parse_realtime(inner: bytes):
     return {"ts": ts, "hr": hr, "rr_1024": rr}
 
 
+HIST_V24_LEN = 93       # payload bytes after [type][version][cmd] in a version-24 record
+OPTICAL_FLOOR = 547     # what the two optical levels (d61, d65) read with nothing on the sensor
+
+
 def parse_historical(inner: bytes):
-    # inner=[0x2F][ver][cmd][data...]; data=inner[3:]. One record per second, ts = Unix time.
-    # seq/ts/hr/rr are verified on record version 24 (hr and RR match the live stream);
-    # the fields after rr come from the V12 layout and are not verified for other versions.
+    """One stored-history record. inner=[0x2F][ver][cmd][data...]; data=inner[3:]; ts = Unix time.
+
+    Version 24 (93 data bytes), checked against two stored nights (see decode.py):
+      0 seq u32 (+1 per record, also across the time the strap was off the wrist)
+      4 ts u32, 14 hr, 15 RR count, 16 4x RR u16 (1/1024 s)  - hr and RR match the live stream
+      33 accel x,y,z f32 in g (49-60 repeat them)              - movement matches sleep/walks
+      61 optical level A u16, 65 optical level B u16           - both fall to ~547 (no light)
+         the second the strap comes off; which LED/wavelength each is, is NOT known
+      69 skin temperature u16, raw                              - slow: climbs ~30 counts over
+         20 minutes after putting the strap on, highest asleep; one paired night says ~0.1 C/count
+      85 step counter u16, cumulative                          - +100-110 per minute walking,
+         flat when still; it resets now and then (the WHOOP app reset it at sync)
+    Not fields: d48 (the top byte of a float at d45, NOT skin contact), d73-76 (constant).
+    Other versions only get seq/ts; their layout differs (25 = a 24 Hz optical burst).
+    """
     d = inner[3:]
     if len(d) < 24:
         return {"ver": inner[1], "raw": d.hex()}
@@ -112,19 +144,80 @@ def parse_historical(inner: bytes):
         "ver": inner[1],
         "seq": struct.unpack_from("<I", d, 0)[0],
         "ts": struct.unpack_from("<I", d, 4)[0],
-        "hr": d[14] if len(d) > 14 else None,
-        "rr_count": d[15] if len(d) > 15 else None,
+        "hr": d[14],
+        "rr_count": d[15],
+        "rr_1024": [struct.unpack_from("<H", d, 16 + 2 * i)[0] for i in range(4)],
     }
-    if len(d) >= 24:
-        rec["rr_1024"] = [struct.unpack_from("<H", d, 16 + 2 * i)[0] for i in range(4)]
-    if len(d) >= 45:
+    if inner[1] == 24 and len(d) >= HIST_V24_LEN:
         rec["accel_g"] = list(struct.unpack_from("<3f", d, 33))
-    if len(d) >= 49:
-        rec["skin_contact"] = d[48]
-    if len(d) >= 77:
-        rec["spo2_red"], rec["spo2_ir"] = struct.unpack_from("<2H", d, 61)
-        rec["skin_temp_raw"] = struct.unpack_from("<H", d, 65)[0]
+        rec["optical"] = [struct.unpack_from("<H", d, 61)[0], struct.unpack_from("<H", d, 65)[0]]
+        rec["skin_temp_raw"] = struct.unpack_from("<H", d, 69)[0]
+        rec["steps_total"] = struct.unpack_from("<H", d, 85)[0]
     return rec
+
+
+def parse_battery(inner: bytes):
+    """Battery % from the strap's reply to GetBatteryLevel (0x1A), or None.
+
+    Reply data (after type, seq, opcode): 2 bytes, then the fuel gauge in tenths of a
+    percent as u16 LE (seen: 00 01 e8 03 = 100.0% on the charger). This is the strap's
+    reading right now, unlike console "SOC report" lines, which a history drain replays
+    from weeks or months back.
+    """
+    d = inner[3:]
+    if len(d) < 4:
+        return None
+    tenths = struct.unpack_from("<H", d, 2)[0]
+    return tenths / 10 if tenths <= 1000 else None
+
+
+def history_record(seq, ts, hr=0, rr=(), accel=(0.0, 0.0, 1.0), optical=(600, 850), temp=330, steps=0, cmd=5):
+    """Build a version-24 stored-history record (inner bytes) with the fields above. For tests."""
+    d = bytearray(HIST_V24_LEN)
+    struct.pack_into("<II", d, 0, seq, ts)
+    d[14], d[15] = hr, len(rr)
+    struct.pack_into("<4H", d, 16, *(list(rr) + [0, 0, 0, 0])[:4])
+    struct.pack_into("<3f", d, 33, *accel)
+    struct.pack_into("<3f", d, 49, *accel)
+    struct.pack_into("<H", d, 61, optical[0])
+    struct.pack_into("<H", d, 65, optical[1])
+    struct.pack_into("<H", d, 69, temp)
+    struct.pack_into("<H", d, 85, steps)
+    return bytes([T_HISTORICAL, 24, cmd]) + bytes(d)
+
+
+def haptics_payload(pattern: int = 2, loops: int = 1) -> bytes:
+    """RUN_HAPTICS_PATTERN body: [pattern id][loops][0][0][0]. Pattern 2 is the app's alarm buzz."""
+    if not (0 <= pattern <= 255 and 1 <= loops <= 5):
+        raise ValueError("pattern must be 0-255 and loops 1-5")
+    return bytes([pattern, loops, 0, 0, 0])
+
+
+def alarm_payload(epoch: float) -> bytes:
+    """SET_ALARM_TIME body, revision 1: [0x01][u32 unix s][u16 1/32768 s][u16 buzz mode 0]."""
+    sec = int(epoch)
+    sub = int((epoch - sec) * 32768) & 0xFFFF
+    return struct.pack("<BIHH", 1, sec, sub, 0)
+
+
+def parse_response(inner: bytes):
+    """A COMMAND_RESPONSE: [0x24][seq][opcode][0][status][body...]. status 1 = OK."""
+    if len(inner) < 5:
+        return None
+    return {"op": inner[2], "status": inner[4], "ok": inner[4] == 1, "body": bytes(inner[5:])}
+
+
+def parse_alarm(body: bytes):
+    """GET_ALARM_TIME reply body: [revision][armed flag][u32 unix seconds][u16 subsec].
+
+    Seen on a real WHOOP 4.0 (2026-11-19): after arming 1795080778 the body was
+    01 01 4a c2 fe 6a ..; after DISABLE_ALARM, and after the alarm rang, it read as not armed.
+    Returns the armed time (unix seconds), or None when nothing is armed or the form is unknown.
+    """
+    if len(body) >= 6 and body[0] in (1, 4):
+        t = struct.unpack_from("<I", body, 2)[0]
+        return t if body[1] == 1 and t else None
+    return None
 
 
 def parse_metadata(inner: bytes):
@@ -142,9 +235,12 @@ class Whoop:
         self.on_realtime = None
         self.on_historical = None
         self.on_meta = None
+        self.on_battery = None        # called with the battery % when the strap answers 0x1A
         self.raw_sink = None          # optional: called with (channel, inner) for every frame
         self.verbose = True           # print every response/event (the daemon turns this off)
         self._hist_done = asyncio.Event()
+        self.on_event = None          # optional: called with (event id, inner) for every EVENT
+        self._waiting = {}            # opcode -> Future for that command's next response
 
     async def __aenter__(self):
         try:
@@ -193,14 +289,71 @@ class Whoop:
                 asyncio.create_task(self._ack(m["trim"]))
             if m["subtype"] == 3:                              # COMPLETE
                 self._hist_done.set()
-        elif t == T_CMD_RESP and self.verbose:
-            print(f"  [resp op=0x{inner[2]:02x}] {inner[3:].hex(' ')}")
-        elif t == T_EVENT and self.verbose:
-            print(f"  [event #{inner[2]}] {inner[3:].hex(' ')}")
+        elif t == T_CMD_RESP:
+            if inner[2] == C_BATTERY and self.on_battery:
+                pct = parse_battery(inner)
+                if pct is not None:
+                    self.on_battery(pct)
+            fut = self._waiting.pop(inner[2], None)
+            if fut and not fut.done():
+                fut.set_result(parse_response(inner))
+            if self.verbose:
+                print(f"  [resp op=0x{inner[2]:02x}] {inner[3:].hex(' ')}")
+        elif t == T_EVENT:
+            if self.on_event:
+                self.on_event(inner[2], inner)
+            if self.verbose:
+                name = EVENT_NAMES.get(inner[2], "")
+                print(f"  [event #{inner[2]}{' ' + name if name else ''}] {inner[3:].hex(' ')}")
 
     async def send(self, frame):
         await asyncio.wait_for(self.client.write_gatt_char(CMD_CHAR, frame, response=False),
                                WRITE_TIMEOUT)
+
+    async def request(self, opcode, data=b"", timeout=3.0):
+        """Send a command and wait for its COMMAND_RESPONSE. Returns parse_response(), or
+        None if the strap did not answer within `timeout` seconds."""
+        fut = asyncio.get_running_loop().create_future()
+        self._waiting[opcode] = fut
+        try:
+            await self.send(cmd(opcode, data))
+            return await asyncio.wait_for(fut, timeout)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            if self._waiting.get(opcode) is fut:
+                del self._waiting[opcode]
+
+    # ---- haptics and the strap's alarm ----
+    async def buzz(self, pattern=2, loops=1):
+        """Vibrate now. Pattern 2 is the buzz the WHOOP app uses for its alarm."""
+        return await self.request(C_RUN_HAPTICS, haptics_payload(pattern, loops))
+
+    async def stop_buzz(self):
+        """Ask the strap to stop a running vibration. NOT WORKING on the tested firmware: the
+        strap answers status 3 and keeps buzzing (2026-11-19). Kept for experiments."""
+        return await self.request(C_STOP_HAPTICS, b"\x00")
+
+    async def set_alarm(self, epoch):
+        """Arm the strap's own alarm for `epoch` (unix seconds). The strap rings by itself at
+        that time, connected or not, and then clears it (one-shot). The strap clock is set
+        first so both sides agree on what that time is."""
+        await self.set_time()
+        return await self.request(C_SET_ALARM, alarm_payload(epoch))
+
+    async def get_alarm(self):
+        """The armed alarm time (unix seconds), or None. Raises TimeoutError if no answer."""
+        r = await self.request(C_GET_ALARM, b"\x01")
+        if r is None:
+            raise TimeoutError("strap did not answer GET_ALARM_TIME")
+        return parse_alarm(r["body"]) if r["ok"] else None
+
+    async def disable_alarm(self):
+        return await self.request(C_DISABLE_ALARM, b"\x01")
+
+    async def run_alarm(self):
+        """Ring the alarm now (the strap's full alarm buzz, until stopped or it times out)."""
+        return await self.request(C_RUN_ALARM, b"\x01")
 
     async def _ack(self, trim):
         await self.send(cmd(C_HIST_ACK, struct.pack("<BII", 1, trim, 0)))
@@ -217,6 +370,11 @@ class Whoop:
 
     async def battery(self):
         await self.send(cmd(C_BATTERY, b"\x00"))
+
+    async def pack_battery(self):
+        """Battery Level characteristic (likely the battery pack), 0-100, or None."""
+        v = await asyncio.wait_for(self.client.read_gatt_char(PACK_CHAR), WRITE_TIMEOUT)
+        return v[0] if v and v[0] <= 100 else None
 
     async def version(self):
         await self.send(cmd(C_VERSION, b"\x00"))
@@ -293,6 +451,11 @@ async def cli():
 
 if __name__ == "__main__":
     # self-test of frame builder against CRC-verified captures
+    if len(sys.argv) > 1 and sys.argv[1] in ("buzz", "alarm"):
+        # buzz [pattern] [loops] | alarm 07:00 [once] | alarm off | alarm show
+        # Goes through the daemon when it holds the strap, else connects directly (alarm.py).
+        import alarm
+        sys.exit(alarm.cli(sys.argv[1:]))
     if len(sys.argv) > 1 and sys.argv[1] == "selftest":
         checks = {
             "HR on":   (cmd(C_TOGGLE_HR, b"\x01"), "aa0800a823000e01d4c2477a"),
@@ -305,6 +468,8 @@ if __name__ == "__main__":
             "drain":   (cmd(C_SEND_HIST, b"\x00"), "aa0800a8230016001b6a5b8f"),
             "highfreq":(cmd(C_HIGHFREQ_ON),      "aa07006b230060f340f888"),
             "abort":   (cmd(C_ABORT_HIST),       "aa07006b230014d6f590df"),
+            # sent to a real 4.0 on 2026-11-19; it buzzed (HAPTICS_FIRED, then HAPTICS_TERMINATED)
+            "buzz":    (cmd(C_RUN_HAPTICS, haptics_payload(2, 1)), "aa0c00fc23004f02010000006036a92e"),
         }
         ok = True
         for name, (got, want) in checks.items():

@@ -7,14 +7,14 @@ description: >
   official WHOOP API, store everything in SQLite, run the full-screen localhost
   dashboard (Heart, Today, Archive), and keep it syncing and backed up. Use when a user
   wants to own their WHOOP data, read the strap without the app, build a WHOOP
-  dashboard, or reproduce github.com/tohmsc/whoop-os-public. Targets WHOOP 4.0 (BLE service
+  dashboard, or reproduce github.com/tohmsc/openvitals-public. Targets WHOOP 4.0 (BLE service
   61080001-8d6d-82b8-614a-1c8cb0f8dcc6); notes where 5.0/MG differ.
 ---
 
 # Reverse-engineer your WHOOP (own your data)
 
 This skill rebuilds a working system that already exists: the code is
-[github.com/tohmsc/whoop-os-public](https://github.com/tohmsc/whoop-os-public), folder `whoop-tools/`.
+[github.com/tohmsc/openvitals-public](https://github.com/tohmsc/openvitals-public), folder `whoop-tools/`.
 You do not need to reverse engineer the protocol again. Your job is to install it on
 the user's machine, prove each layer works, and adapt it to what they have.
 
@@ -63,7 +63,7 @@ Full commands and platform notes are in `resources/SETUP.md`.
 
 ### 1. Get the code and dependencies
 ```bash
-git clone https://github.com/tohmsc/whoop-os-public.git && cd whoop-os-public/whoop-tools
+git clone https://github.com/tohmsc/openvitals-public.git && cd openvitals-public/whoop-tools
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 Done when: `doctor.py` shows Python 3.10+ and all four packages PASS.

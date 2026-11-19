@@ -3,7 +3,7 @@
 
 Run:  .venv/bin/python -m unittest test_telegram -v
 """
-import os, tempfile, time, unittest
+import json, os, tempfile, time, unittest
 
 _TMP = tempfile.mkdtemp(prefix="whoop-telegram-test-")
 os.environ["WHOOP_DB"] = os.path.join(_TMP, "test.db")
@@ -84,8 +84,8 @@ class TelegramTest(unittest.TestCase):
         self.c.commit()
 
     def soc(self, pct):
-        self.c.execute("INSERT OR REPLACE INTO device_soc(rtc,soc_pct,subsystem) VALUES(?,?,'SUPERVISOR')",
-                       (int(time.time()) + self.c.execute("SELECT COUNT(*) n FROM device_soc").fetchone()["n"], pct))
+        self.c.execute("INSERT OR REPLACE INTO sync_state(key,value) VALUES('battery_now',?)",
+                       (json.dumps({"soc": pct, "ts": time.time(), "src": "strap"}),))
         self.c.commit()
 
     def test_morning_message_reads_like_a_person(self):
@@ -256,6 +256,52 @@ class TelegramTest(unittest.TestCase):
             tr.run_due(api=tg, now=midnight + 9 * 3600, uptime=60)
         tg.fail = False
         self.assertEqual(tr.run_due(api=tg, now=midnight + 9 * 3600 + 60, uptime=60), "sent")
+
+    def test_coverage_explains_each_gap(self):
+        import metrics
+        c = self.c
+        c.execute("DELETE FROM host_log")
+        a = int(time.time()) - 20000
+        rows = [(a + s, 60, "") for s in list(range(0, 1000)) + list(range(4600, 5000))]
+        c.executemany("INSERT INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)", rows)
+        c.executemany("INSERT INTO host_log(start,end,state) VALUES(?,?,?)",
+                      [(a, a + 900, "linked"), (a + 900, a + 4500, "asleep"), (a + 4500, a + 10000, "linked")])
+        db.set_state(c, "history_ts", a + 2000)              # the strap has been read up to here
+        cov = metrics.coverage(c, a, a + 10000)
+        self.assertEqual(cov["recorded_s"], 1400)
+        self.assertAlmostEqual(cov["share"], 0.14)
+        (big, why_big), (small, why_small) = [((g["start"] - a, g["end"] - a), g["why"]) for g in cov["gaps"]]
+        self.assertEqual((big, small), ((5000, 10000), (1000, 4600)))   # longest first
+        self.assertEqual(why_big, "still on the strap, comes in at the next sync")
+        self.assertEqual(why_small, "still on the strap, comes in at the next sync (the Mac was asleep)")
+        self.assertAlmostEqual(cov["pending_s"], 5000 + 2600)
+        self.assertAlmostEqual(cov["nothing_s"], 1000)
+        db.set_state(c, "history_ts", a + 20000)             # read past both: nothing more will come
+        cov = metrics.coverage(c, a, a + 10000)
+        whys = [g["why"] for g in cov["gaps"]]
+        self.assertEqual(whys[0], "the strap was connected but sent no heart rate (off the wrist?)")
+        self.assertTrue(whys[1].endswith("; the Mac was asleep"))
+        self.assertEqual(cov["pending_s"], 0)
+        self.assertEqual(metrics.coverage(c, a + 30000, a + 40000)["span_s"], 0)   # the future isn't a gap
+
+    def test_morning_message_says_why_strain_was_held_back(self):
+        import scores
+        c = self.c
+        c.execute(scores.SCHEMA)
+        c.execute("DELETE FROM estimates")
+        y, morning = tr.day_bounds(-1)
+        c.executemany("INSERT INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,'')",
+                      [(y + 10 * 3600 + i, 70) for i in range(7200)])          # 10:00-12:00 only
+        date = time.strftime("%Y-%m-%d", time.localtime(y + 43200))
+        c.execute("INSERT INTO estimates(date,kind,version,value,ok,why,row,inputs,computed_at) "
+                  "VALUES(?,?,?,?,?,?,?,?,?)", (date, "strain", scores.current(c), 5.0, 0, "too little", "{}", "{}", 0))
+        db.set_state(c, "history_ts", time.time())
+        text = tr.compose(c, y, morning, "Yesterday", morning)
+        line = next(l for l in text.split("\n") if "Strain held back" in l)
+        self.assertIn("the strap recorded 8% of yesterday (needs 85%)", line)
+        self.assertIn("Biggest gap 12:00-04:00 (16h 0m): the strap had nothing stored for it", line)
+        c.execute("UPDATE estimates SET ok = 1")                          # shown: nothing to explain
+        self.assertNotIn("Strain held back", tr.compose(c, y, morning, "Yesterday", morning))
 
     def test_morning_message_waits_for_last_night_to_arrive(self):
         # laptop slept all night: at 08:00 the strap's stored history has only been read up to 23:00

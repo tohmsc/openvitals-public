@@ -242,9 +242,10 @@
   let RANGE = 30;
   let woExpanded = false;
 
+  // The window ends at the chosen day (not at the newest row), so a 2026 day never shows 2025 as "the last 30 days".
   const inRange = (rows, key) => {
     if (!rows.length) return rows;
-    const last = Math.max(...rows.map((r) => +day(r[key])));
+    const last = ADATE ? +fromYmd(ADATE) + DAY : Math.max(...rows.map((r) => +day(r[key])));
     const cut = last - RANGE * DAY;
     return rows.filter((r) => +day(r[key]) > cut);
   };
@@ -325,7 +326,7 @@
 
   /* ───────── Recovery hero ───────── */
   function renderRecovery(d) {
-    const r = d.recovery[0];
+    const r = ofDay(d.recovery[0], "created_at");
     const ring = $("#rec-ring"), status = $("#rec-status"), card = $(".card--readiness");
     const z = zoneOf(r?.recovery_score);
     ring.dataset.zone = z;
@@ -337,10 +338,13 @@
     requestAnimationFrame(() => requestAnimationFrame(() =>
       arcs.forEach((a) => a.setAttribute("stroke-dasharray", `${Math.max(0.5, r?.recovery_score ?? 0)} 100`))));
     $(".status__text", status).textContent = r ? ZONE_LABEL[z] : "No score yet";
-    $("#rec-date").textContent = r ? `Scored ${dLong.format(+day(r.created_at))}` : "";
+    const why = heldWhy("recovery");
+    $("#rec-date").textContent = r ? (r.est ? `Estimated from the strap for ${dLong.format(+day(r.created_at))} (model ${r.est})` : `Scored ${dLong.format(+day(r.created_at))}`)
+      : why ? `Held back: ${why}` : "No recovery for this day";
     ring.setAttribute("role", "img");
     ring.setAttribute("aria-label", r ? `Recovery ${fmt(r.recovery_score)} percent, ${ZONE_LABEL[z].toLowerCase()}` : "No recovery score");
 
+    if (!r) { $("#rec-drivers").innerHTML = ""; $("#rec-insight").innerHTML = ""; return; }
     const rec = d.recovery.slice().reverse(), slp = d.sleep.slice().reverse();
     const DRIVERS = [
       { name: "Heart rate variability", series: rec.map((x) => x.hrv_rmssd_ms), unit: "ms", color: "--m-hrv" },
@@ -382,11 +386,13 @@
     for (const m of VITALS) {
       const rows = d[m.src].slice().reverse();
       const series = rows.map((r) => r[m.key]);
-      const latest = series.at(-1);
+      const latest = ofDay(rows.at(-1), m.src === "sleep" ? "end" : "created_at") ? series.at(-1) : null;
       const b = baseline(series);
       const card = el("article", "card vital");
       const id = `spark-${m.key}`;
-      let flag = "", delta = `<p class="vital__delta">Not enough history yet</p>`, word = "";
+      const last30 = rows.slice(-30);
+      const hasLine = last30.length >= 2 && latest != null;
+      let flag = "", delta = `<p class="vital__delta">${rows.length && latest == null ? "No reading this day" : "Not enough history yet"}</p>`, word = "";
       if (b && latest != null) {
         const z = b.sd ? (latest - b.mean) / b.sd : 0;
         const f = z > 1 ? "up" : z < -1 ? "down" : "info";
@@ -404,11 +410,10 @@
         </div>
         <p class="vital__value"><span class="vital__num">${fmt(latest, m.d)}</span><span class="vital__unit">${m.unit}</span></p>
         ${delta}
-        <div class="vital__spark"><canvas id="${id}" role="img" aria-label="${m.label}, last 30 readings"></canvas></div>
+        <div class="vital__spark">${hasLine ? `<canvas id="${id}" role="img" aria-label="${m.label}, last 30 readings"></canvas>` : ""}</div>
         ${refBar(series, latest, m.color, m.d)}`;
       host.append(card);
-      const last30 = rows.slice(-30);
-      if (last30.length < 2) continue;
+      if (!hasLine) continue;   // no line of older days under "no reading this day"
       const color = tok(m.color);
       const opts = baseOptions();
       opts.scales.x.display = false;
@@ -456,7 +461,7 @@
       $("#t-rec-stat").innerHTML = `Average <strong>${fmt(mean(scores))}%</strong> · ${counts.good} high, ${counts.fair} moderate, ${counts.low} low`;
       const o = baseOptions({ y: { min: 0, max: 100, ticks: { ...baseOptions().scales.y.ticks, stepSize: 25, callback: (v) => `${v}%` } }, plugins: { avgLine: { value: mean(scores) } } });
       o.plugins.tooltip.callbacks = {
-        label: (i) => ` ${fmt(i.parsed.y)}% · ${ZONE_LABEL[zoneOf(i.parsed.y)]}`,
+        label: (i) => ` ${fmt(i.parsed.y)}% · ${ZONE_LABEL[zoneOf(i.parsed.y)]}${estNote(rec[i.dataIndex])}`,
       };
       o.plugins.tooltip.displayColors = true;
       const c = mount("c-rec", {
@@ -466,7 +471,7 @@
         plugins: [avgLine],
       });
       c.canvas.setAttribute("aria-label", `Recovery over the last ${RANGE} days: average ${fmt(mean(scores))} percent; ${counts.good} high, ${counts.fair} moderate and ${counts.low} low days.`);
-    } else emptyState("c-rec", "No recovery scores", "Run whoop_api.py sync to pull your history.");
+    } else emptyState("c-rec", "No recovery in this range", "Strap recovery starts after 3 nights of your own, on nights with a clean HRV reading.");
 
     lineTrend("c-hrv", "#t-hrv-stat", rec, "hrv_rmssd_ms", "--m-hrv", "ms", "Heart rate variability", d.recovery);
     lineTrend("c-rhr", "#t-rhr-stat", rec, "resting_hr", "--m-rhr", "bpm", "Resting heart rate", d.recovery);
@@ -486,7 +491,7 @@
     o.scales.y.min = Math.max(0, Math.floor((lo - pad) / 5) * 5);
     o.scales.y.max = Math.ceil((hi + pad) / 5) * 5;
     o.plugins.tooltip.callbacks = {
-      label: (i) => ` ${i.dataset.label}: ${fmt(i.parsed.y)} ${unit}`,
+      label: (i) => ` ${i.dataset.label}: ${fmt(i.parsed.y)} ${unit}${i.datasetIndex === 0 ? estNote(rows[i.dataIndex]) : ""}`,
     };
     const c = mount(id, {
       type: "line",
@@ -510,27 +515,36 @@
     { key: "total_light_ms", label: "Light", color: "--stage-light" },
     { key: "total_awake_ms", label: "Awake", color: "--stage-awake" },
   ];
+  // Strap estimates know asleep vs awake, not deep/REM/light.
+  const stagesOf = (s) => (s.est ? [{ key: "_asleep", label: "Asleep", color: "--stage-light" }, STAGES[3]] : STAGES);
+  const withAsleep = (s) => (s.est ? { ...s, _asleep: (s.total_in_bed_ms || 0) - (s.total_awake_ms || 0) } : s);
   function renderLastNight(d) {
-    const s = d.sleep[0];
+    const s0 = ofDay(d.sleep[0], "end"), s = s0 && withAsleep(s0);
     const host = $("#lastnight");
-    if (!s) { host.innerHTML = `<div class="empty"><div><strong>No sleep recorded</strong>Wear the strap overnight, then sync.</div></div>`; return; }
+    if (!s) {
+      const why = heldWhy("sleep");
+      $("#ln-date").textContent = "";
+      host.innerHTML = `<div class="empty"><div><strong>No sleep for this night</strong>${why ? `Held back: ${esc(why)}` : "Wear the strap overnight, then sync."}</div></div>`;
+      return;
+    }
     const recent = Date.now() - +day(s.end) < 36 * 36e5;
     $("#ln-h").textContent = recent ? "Last night" : "That night";
     $("#ln-date").textContent = `${recent ? "" : dShort.format(+day(s.end)) + (new Date(s.end).getFullYear() !== new Date().getFullYear() ? `, ${new Date(s.end).getFullYear()}` : "") + " · "}${dTime.format(+day(s.start))} – ${dTime.format(+day(s.end))}`;
     const asleep = (s.total_in_bed_ms || 0) - (s.total_awake_ms || 0);
-    const total = STAGES.reduce((t, st) => t + (s[st.key] || 0), 0) || 1;
+    const SG = stagesOf(s);
+    const total = SG.reduce((t, st) => t + (s[st.key] || 0), 0) || 1;
     host.innerHTML = `
       <div>
         <p class="headline" aria-label="${hm(asleep)} asleep"><span class="headline__num">${Math.floor(asleep / 36e5)}</span><span class="headline__unit">h</span><span class="headline__num">${Math.round((asleep % 36e5) / 6e4)}</span><span class="headline__unit">m</span></p>
-        <p class="headline__label">Time asleep${s.sleep_perf == null ? "" : ` · ${fmt(s.sleep_perf)}% of sleep needed`}</p>
+        <p class="headline__label">Time asleep${s.sleep_perf == null ? "" : ` · ${fmt(s.sleep_perf)}% of sleep needed`}${s.est ? ` · strap estimate (${s.est}), no sleep stages` : ""}</p>
       </div>
       <div>
-        <div class="stagebar" role="img" aria-label="${STAGES.map((st) => `${st.label} ${hm(s[st.key])}`).join(", ")}">
-          ${STAGES.map((st) => `<span style="--c:var(${st.color});flex:${s[st.key] || 0}"></span>`).join("")}
+        <div class="stagebar" role="img" aria-label="${SG.map((st) => `${st.label} ${hm(s[st.key])}`).join(", ")}">
+          ${SG.map((st) => `<span style="--c:var(${st.color});flex:${s[st.key] || 0}"></span>`).join("")}
         </div>
       </div>
       <ul class="stagelist">
-        ${STAGES.map((st) => `<li><span class="swatch" style="--c:var(${st.color})"></span><span>${st.label}</span><span class="v">${hm(s[st.key])}</span><span class="p">${n0.format(((s[st.key] || 0) / total) * 100)}%</span></li>`).join("")}
+        ${SG.map((st) => `<li><span class="swatch" style="--c:var(${st.color})"></span><span>${st.label}</span><span class="v">${hm(s[st.key])}</span><span class="p">${n0.format(((s[st.key] || 0) / total) * 100)}%</span></li>`).join("")}
       </ul>
       <dl class="kv kv--grid">
         <div><dt>Efficiency</dt><dd>${fmtU(s.sleep_efficiency, "%")}</dd></div>
@@ -542,7 +556,7 @@
 
   function renderSleepChart(d) {
     const rows = inRange(d.sleep.slice().reverse(), "end");
-    if (!rows.length) return emptyState("c-sleep", "No sleep data", "Sleep appears here after your first synced night.");
+    if (!rows.length) return emptyState("c-sleep", "No sleep in this range", "Sleep appears here after a night the strap recorded.");
     clearEmpty("c-sleep");
     const h = (ms) => (ms || 0) / 36e5;
     const asleep = rows.map((s) => h(s.total_in_bed_ms) - h(s.total_awake_ms));
@@ -558,10 +572,10 @@
       type: "bar",
       data: {
         labels: rows.map((s) => dShort.format(+day(s.end))),
-        datasets: STAGES.map((st, i) => ({
-          label: st.label, data: rows.map((s) => h(s[st.key])), backgroundColor: tok(st.color),
-          borderColor: surface, borderWidth: { top: i === STAGES.length - 1 ? 0 : 1.5, bottom: 0, left: 0, right: 0 },
-          borderRadius: i === STAGES.length - 1 ? { topLeft: 3, topRight: 3 } : 0, borderSkipped: false,
+        datasets: [...STAGES, { key: "_asleep", label: "Asleep (strap estimate, no stages)", color: "--stage-light" }].map((st, i, all) => ({
+          label: st.label, data: rows.map((s) => h(withAsleep(s)[st.key])), backgroundColor: st.key === "_asleep" ? alpha(tok(st.color), 0.55) : tok(st.color),
+          borderColor: surface, borderWidth: { top: i === all.length - 1 ? 0 : 1.5, bottom: 0, left: 0, right: 0 },
+          borderRadius: i === all.length - 1 ? { topLeft: 3, topRight: 3 } : 0, borderSkipped: false,
           categoryPercentage: 0.82, barPercentage: 0.9, maxBarThickness: 14,
         })),
       },
@@ -573,14 +587,14 @@
   /* ───────── Activity ───────── */
   function renderStrain(d) {
     const rows = inRange(d.cycle.filter((c) => c.end && c.strain > 0).reverse(), "start");
-    if (!rows.length) return emptyState("c-strain", "No strain data", "Strain is scored at the end of each day.");
+    if (!rows.length) return emptyState("c-strain", "No strain in this range", "Strap strain appears for each finished day the strap recorded at least 85% of.");
     clearEmpty("c-strain");
     const vals = rows.map((r) => r.strain);
     const peak = rows[vals.indexOf(Math.max(...vals))];
     $("#st-stat").innerHTML = `Average <strong>${fmt(mean(vals), 1)}</strong> · peak ${fmt(peak.strain, 1)} on ${dShort.format(+day(peak.start))}`;
     const o = baseOptions({ y: { min: 0, max: 21, ticks: { ...baseOptions().scales.y.ticks, stepSize: 7 } }, plugins: { avgLine: { value: mean(vals) } } });
     o.plugins.tooltip.callbacks = {
-      label: (i) => ` Strain ${fmt(i.parsed.y, 1)}`,
+      label: (i) => ` Strain ${fmt(i.parsed.y, 1)}${estNote(rows[i.dataIndex])}`,
       afterLabel: (i) => {
         const r = rows[i.dataIndex];
         return r.avg_hr ? ` Avg ${fmt(r.avg_hr)} bpm · max ${fmt(r.max_hr)} bpm` : "";
@@ -666,46 +680,69 @@
   /* ───────── Device ───────── */
   const TAG = { SUPERVISOR: "#f4b740", BLE: "#6cb8ff", SENSOR: "#3df5b0", STORAGE: "#a08fff", HR: "#ff7a90" };
   function renderDevice(d) {
+    // Two batteries: the strap's own gauge (GetBatteryLevel) and the Bluetooth Battery Level
+    // value, which reads differently and is most likely the slide-on battery pack. The
+    // firmware's "SOC report" log lines are not used: a history drain replays old ones.
     const soc = d.soc || [];
-    // the latest reading as decode.py recorded it (the series is in arrival order)
-    const last = d.battery != null ? { soc_pct: d.battery } : soc.at(-1);
+    const strap = d.battery != null ? d.battery : d.demo && soc.length ? soc.at(-1).soc_pct : null;
+    const pack = d.pack_battery ?? null;
     const bat = $("#battery");
-    if (last) {
-      const z = last.soc_pct < 15 ? "low" : last.soc_pct < 30 ? "fair" : "good";
-      bat.dataset.zone = z;
-      $("#side-bat").textContent = `${fmt(last.soc_pct)}%`;
-      bat.innerHTML = `<span class="battery__icon" aria-hidden="true"><span class="battery__fill" style="width:${Math.max(4, last.soc_pct)}%"></span></span>
-        <span class="battery__num">${fmt(last.soc_pct)}<small>%</small></span>
-        ${z === "good" ? "" : `<span class="status-chip" data-zone="${z}"><span class="status__icon" aria-hidden="true"></span>${z === "low" ? "Charge soon" : "Getting low"}</span>`}`;
-      if (soc.length > 1) {
-        clearEmpty("c-soc");
-        const color = tok("--m-battery");
-        const o = baseOptions({ y: { min: 0, max: 100, display: false } });
-        o.scales.x.display = false;
-        o.plugins.tooltip.callbacks = { title: () => "", label: (i) => ` ${fmt(i.parsed.y, 1)}%` };
-        o.plugins.tooltip.displayColors = false;
-        mount("c-soc", {
-          type: "line",
-          data: { labels: soc.map((_, i) => i), datasets: [{ data: soc.map((s) => s.soc_pct), borderColor: color, borderWidth: 1.75, stepped: false, tension: 0.2, pointRadius: 0, pointHoverRadius: 4, fill: true, backgroundColor: (ctx) => {
-            const a = ctx.chart.chartArea; if (!a) return "transparent";
-            const g = ctx.chart.ctx.createLinearGradient(0, a.top, 0, a.bottom); g.addColorStop(0, alpha(color, 0.25)); g.addColorStop(1, alpha(color, 0)); return g;
-          } }] },
-          options: o,
-          plugins: [crosshair],
-        }).canvas.setAttribute("aria-label", `Battery level across ${soc.length} firmware reports, latest ${fmt(last.soc_pct)} percent.`);
-      }
-    } else {
-      bat.innerHTML = `<div class="empty"><div><strong>No battery reports</strong>Run daemon.py with the strap nearby.</div></div>`;
-      emptyState("c-soc", "", "");
+    $("#side-bat").textContent = strap != null ? `${fmt(strap)}%` : "—";
+    if (strap == null && pack == null) {
+      bat.innerHTML = `<div class="empty"><div><strong>No battery reading yet</strong>The Mac asks the strap every few minutes while it is in range.</div></div>`;
+      return renderDeviceRest(d);
     }
+    const row = (name, v) => {
+      if (v == null) return `<div class="battery__row"><span class="battery__label">${name}</span><span class="battery__num battery__num--none">—</span></div>`;
+      const z = v < 15 ? "low" : v < 30 ? "fair" : "good";
+      return `<div class="battery__row" data-zone="${z}">
+        <span class="battery__label">${name}</span>
+        <span class="battery__icon" aria-hidden="true"><span class="battery__fill" style="width:${Math.max(4, v)}%"></span></span>
+        <span class="battery__num">${fmt(v)}<small>%</small></span>
+        ${z === "good" ? "" : `<span class="status-chip" data-zone="${z}"><span class="status__icon" aria-hidden="true"></span>${z === "low" ? "Charge soon" : "Getting low"}</span>`}
+      </div>`;
+    };
+    bat.innerHTML = row("Strap", strap) + row("Battery pack", pack);
+    renderDeviceRest(d);
+  }
+
+  function renderDeviceRest(d) {
 
     const labels = { api_recovery: "Recovery scores", api_sleep: "Sleeps", api_cycle: "Daily cycles", api_workout: "Workouts", ble_hr: "Live HR samples", ble_raw: "Raw strap frames" };
     $("#counts").innerHTML = Object.entries(d.counts).map(([k, v]) => `<div><dt>${labels[k] || k}</dt><dd>${n0.format(v)}</dd></div>`).join("");
+    renderCoverage(d.coverage || []);
 
     const logs = d.logs || [];
     $("#logs").innerHTML = logs.length
       ? logs.map((l) => `<li><span class="t">${esc(l.rtc)}</span><span class="s" style="--tag:${TAG[l.subsystem] || "#8b949e"}">${esc(l.subsystem)}</span><span class="m">${esc(l.message)}</span></li>`).join("")
       : `<li class="empty"><div><strong>No firmware logs decoded</strong>Run decode.py after a strap drain.</div></li>`;
+  }
+
+  // How much of each day has heart rate (metrics.coverage_days on the Mac). The light part of
+  // the bar is time the strap still holds and hands over at the next sync.
+  function renderCoverage(days) {
+    const el = $("#coverage");
+    if (!days.length) {
+      el.innerHTML = `<li class="empty"><div><strong>No heart rate yet</strong>Coverage shows once the strap has synced.</div></li>`;
+      return;
+    }
+    const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const dur = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.round(s / 60)} min`);
+    el.innerHTML = days.map((c, i) => {
+      const day = i === 0 ? "Today" : i === 1 ? "Yesterday" : new Date(`${c.date}T12:00:00`).toLocaleDateString([], { weekday: "short", day: "numeric" });
+      const rec = Math.min(100, c.share * 100);
+      const wait = c.span_s ? Math.min(100 - rec, (c.pending_s / c.span_s) * 100) : 0;
+      const notes = [];
+      const longestWaits = c.longest && c.longest.why.startsWith("still on the strap");
+      if (c.pending_s >= 600 && !longestWaits) notes.push(`${dur(c.pending_s)} still on the strap, comes in at the next sync.`);
+      if (c.longest && c.share < 0.95) notes.push(`Longest gap ${hm(c.longest.start)}–${hm(c.longest.end)}: ${c.longest.why}.`);
+      return `<li class="coverage__row">
+        <span class="coverage__day">${esc(day)}</span>
+        <span class="coverage__bar" role="img" aria-label="${fmt(rec)} percent recorded${wait >= 1 ? `, ${fmt(wait)} percent still on the strap` : ""}"><i style="width:${rec}%"></i><i style="width:${wait}%"></i></span>
+        <span class="coverage__pct">${fmt(rec)}%</span>
+        ${notes.length ? `<span class="coverage__why">${esc(notes.join(" "))}</span>` : ""}
+      </li>`;
+    }).join("");
   }
 
   /* ───────── Live heart rate ───────── */
@@ -733,6 +770,9 @@
     $("#side-dot").dataset.state = live ? "live" : "off";
     $("#side-device").textContent = live ? "WHOOP 4.0 · streaming" : "WHOOP 4.0";
     const hr = currentHr(L);
+    const heard = L?.ts ? L.ts * 1000 : all.at(-1)?.ts * 1000;
+    $("#device-state .dot").dataset.state = live ? "live" : "off";
+    $("#device-state-text").textContent = live ? "Connected, streaming now" : heard ? `Not connected · last heard ${ago(heard)}` : "Not connected";
     $("#live-hr").textContent = hr ?? "—";
     if (live && hr) card.style.setProperty("--beat", `${(60 / hr).toFixed(2)}s`);
     const lastTs = L?.ts ? L.ts * 1000 : all.at(-1)?.ts * 1000;
@@ -825,7 +865,25 @@
   const ymd = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
   const fromYmd = (k) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
   let PERIOD = "today", ADATE = null; // ADATE = "YYYY-MM-DD" of the archive day being viewed
-  let REC_BY_DAY = new Map();
+  let REC_BY_DAY = new Map(), DAYS = new Set();
+  // Strap estimates (scores.py) come next to WHOOP's own rows, shaped the same, marked with
+  // `est` (the model version). Only days after WHOOP's last score of each kind are added, so a
+  // WHOOP score always wins over an estimate.
+  function mergeEstimates(D) {
+    const E = D.estimates;
+    if (!E) return;
+    for (const [name, key] of [["recovery", "created_at"], ["sleep", "end"], ["cycle", "start"]]) {
+      const est = (E[name] || []).filter((r) => r[key]);
+      if (!est.length) continue;
+      const lastWhoop = D[name].length ? Math.max(...D[name].map((r) => +day(r[key]))) : 0;
+      D[name] = [...est.filter((r) => +day(r[key]) > lastWhoop), ...D[name]].sort((a, b) => +day(b[key]) - +day(a[key]));
+    }
+  }
+  const estNote = (r) => (r?.est ? ` · strap estimate (${r.est})` : "");
+  // The Day view shows a score only on the day it belongs to: an older one is not "this day".
+  const ofDay = (r, key) => (r && (!ADATE || ymd(+day(r[key])) === ADATE) ? r : null);
+  // Why a strap estimate for the chosen day was held back (scores.py's checks), if it was.
+  const heldWhy = (kind) => DATA?.estimates?.held?.find((h) => h.date === ADATE && h.kind === kind)?.why || null;
   const VS = (window.VITALS = { get period() { return PERIOD; }, get date() { return ADATE; }, today: null, baseline: null, setPeriod, setDate, openCal, currentHr });
 
   // Archive lens: everything up to the end of the chosen day, so "latest" = that day.
@@ -842,7 +900,7 @@
     renderPeriod();
   }
   function setDate(k) {
-    if (!REC_BY_DAY.has(k)) return;
+    if (!DAYS.has(k)) return;
     ADATE = k;
     if (DATA) renderAll();
     PERIOD = "archive";
@@ -858,7 +916,11 @@
     const a = DATA?.archive;
     if (a?.start) {
       const range = `${dFull.format(+day(a.start))} – ${dFull.format(+day(a.end))}`;
-      $("#arch-text").textContent = `WHOOP history, recorded ${range}. Nothing on this page is from today; today lives under Today.`;
+      const firstEst = [...(DATA.estimates?.recovery || []), ...(DATA.estimates?.sleep || []), ...(DATA.estimates?.cycle || [])]
+        .map((r) => +day(r.created_at || r.end || r.start)).filter(Boolean).sort((x, y) => x - y)[0];
+      $("#arch-text").textContent = `WHOOP's own scores, recorded ${range}.` + (firstEst
+        ? ` From ${dFull.format(firstEst)}, scores are estimated from the strap with a model fitted on that history, marked "strap estimate", and shown only when the data behind them passes its checks.`
+        : " Nothing on this page is from today; today lives under Today.");
       document.querySelectorAll("[data-archive-range]").forEach((n) => { n.textContent = `${new Date(a.start).getFullYear()}–${String(new Date(a.end).getFullYear()).slice(2)}`; });
     }
     dispatchEvent(new CustomEvent("vitals:period", { detail: { period: PERIOD, date: ADATE } }));
@@ -916,7 +978,7 @@
       hrv: u.hrv ? { mean: u.hrv, sd: u.hrv * u.hrv_spread, n: u.nights } : null };
   }
   function archiveBaseline(d) {
-    const r = d.recovery.slice(0, 30), c = d.cycle.filter((x) => x.end && x.avg_hr).slice(0, 30);
+    const r = d.recovery.filter((x) => !x.est).slice(0, 30), c = d.cycle.filter((x) => x.end && x.avg_hr && !x.est).slice(0, 30);
     const ms = (a) => ({ mean: mean(a), sd: sd(a) ?? 0, n: nums(a).length });
     return { rhr: ms(r.map((x) => x.resting_hr)), hrv: ms(r.map((x) => x.hrv_rmssd_ms)), avgHr: ms(c.map((x) => x.avg_hr)),
       end: d.archive?.end };
@@ -1022,22 +1084,29 @@
     }).canvas.setAttribute("aria-label", `Heart rate today from ${dTime.format(T.first)} to ${dTime.format(T.last)}, average ${fmt(T.avg)} bpm.`);
   }
 
+  /* Energy tile note: WHOOP's number, or the strap estimate (energy.py) with its error, or why it is held back */
+  function energySub(cyc) {
+    if (!cyc?.est) return "whole day";
+    if (cyc.kilojoule) return "whole day · rough estimate, often off by 15-20%";
+    return cyc.energy_why ? `Held back: ${esc(cyc.energy_why)}` : "whole day";
+  }
+
   /* ───────── Archive: day at a glance ───────── */
   function renderGlance(v) {
     const host = $("#glance");
     if (!ADATE) { host.innerHTML = ""; return; }
     const start = +fromYmd(ADATE), end = start + DAY;
     const on = (t) => +day(t) >= start && +day(t) < end;
-    const cyc = v.cycle.find((c) => on(c.start)) || v.cycle[0];
+    const cyc = v.cycle.find((c) => on(c.start));
     const slp = v.sleep.find((s) => on(s.end));
     const wos = v.workout.filter((w) => on(w.start));
     $("#gl-hint").textContent = dDayFull.format(start);
     const tile = (label, val, unit, sub) => `<div class="glance__tile"><p class="glance__label">${label}</p><p class="glance__val">${val}<small>${unit}</small></p><p class="glance__sub">${sub}</p></div>`;
     const asleep = slp ? (slp.total_in_bed_ms || 0) - (slp.total_awake_ms || 0) : null;
     host.innerHTML = [
-      tile("Day strain", fmt(cyc?.strain, 1), "/ 21", cyc?.avg_hr ? `avg ${fmt(cyc.avg_hr)} · max ${fmt(cyc.max_hr)} bpm` : "&nbsp;"),
-      tile("Sleep", slp ? hm(asleep) : "—", "", slp ? `${fmtU(slp.sleep_perf, "% performance")}` : "No sleep scored"),
-      tile("Energy", cyc?.kilojoule ? fmt(cyc.kilojoule / 4.184) : "—", "kcal", "whole day"),
+      tile("Day strain", fmt(cyc?.strain, 1), "/ 21", cyc?.avg_hr ? `avg ${fmt(cyc.avg_hr)} · max ${fmt(cyc.max_hr)} bpm${cyc.est ? " · estimate" : ""}` : heldWhy("strain") ? `Held back: ${esc(heldWhy("strain"))}` : "&nbsp;"),
+      tile("Sleep", slp ? hm(asleep) : "—", "", slp ? `${fmtU(slp.sleep_perf, "% performance")}${slp.est ? " · estimate" : ""}` : heldWhy("sleep") ? `Held back: ${esc(heldWhy("sleep"))}` : "No sleep scored"),
+      tile("Energy", cyc?.kilojoule ? fmt(cyc.kilojoule / 4.184) : "—", "kcal", energySub(cyc)),
       tile("Workouts", String(wos.length), wos.length === 1 ? "session" : "sessions", wos.length ? esc(wos.map((w) => titleCase(w.sport_name)).join(", ")) : "Rest day"),
     ].join("");
   }
@@ -1076,7 +1145,7 @@
       const z = r ? zoneOf(r.recovery_score) : "";
       const sel = (PERIOD === "archive" && k === ADATE) || (PERIOD === "today" && isToday);
       cells += `<button type="button" class="cal__day${isToday ? " cal__day--today" : ""}" data-k="${k}" data-zone="${z}" aria-selected="${sel}"
-        ${r || isToday ? "" : "disabled"} aria-label="${dDayFull.format(new Date(y, m, dd))}${isToday ? ", today" : r ? `, recovery ${fmt(r.recovery_score)}%` : ", no data"}">${dd}<i></i></button>`;
+        ${DAYS.has(k) || isToday ? "" : "disabled"} aria-label="${dDayFull.format(new Date(y, m, dd))}${isToday ? ", today" : r ? `, recovery ${fmt(r.recovery_score)}%` : ", no data"}">${dd}<i></i></button>`;
     }
     const a = DATA?.archive;
     cal.innerHTML = `
@@ -1186,9 +1255,11 @@
       const r = await fetch(summaryUrl(), { cache: "no-store" });
       if (!r.ok) throw new Error(r.status);
       DATA = await r.json();
+      mergeEstimates(DATA);
       REC_BY_DAY = new Map();
       for (const x of DATA.recovery.slice().reverse()) REC_BY_DAY.set(ymd(+day(x.created_at)), x);
-      if (!ADATE || !REC_BY_DAY.has(ADATE)) ADATE = DATA.recovery[0] ? ymd(+day(DATA.recovery[0].created_at)) : null;
+      DAYS = new Set([...REC_BY_DAY.keys(), ...DATA.sleep.map((x) => ymd(+day(x.end))), ...DATA.cycle.map((x) => ymd(+day(x.start)))]);
+      if (!ADATE || !DAYS.has(ADATE)) ADATE = [...DAYS].sort().at(-1) ?? null;
       main.setAttribute("aria-busy", "false");
       renderAll();
       routePeriod();
@@ -1209,18 +1280,81 @@
     pollLive();
     setInterval(pollLive, 2000);
     setInterval(() => DATA && renderHeader(DATA), 60_000);
-    // Quiet refresh so "Today" keeps up with the strap (no loading shimmer).
-    setInterval(async () => {
-      if (!DATA || document.hidden) return;
+    // Quiet refresh so Today and Device keep up with the strap (no loading shimmer).
+    // It runs every minute, and at once when the tab comes back into view.
+    let refreshing = false, refreshedAt = Date.now();
+    const refresh = async () => {
+      if (!DATA || document.hidden || refreshing) return;
+      refreshing = true;
       try {
         const r = await fetch(summaryUrl(), { cache: "no-store" });
         if (!r.ok) return;
         const fresh = await r.json();
-        for (const k of ["today_hr", "today", "personal", "battery", "sync", "counts", "soc"]) DATA[k] = fresh[k];
+        for (const k of ["today_hr", "today", "personal", "battery", "pack_battery", "sync", "counts", "soc", "logs", "stress", "alerts"]) DATA[k] = fresh[k];
+        refreshedAt = Date.now();
         renderHeader(DATA);
-        if (PERIOD === "today") renderToday(DATA);
+        if (PERIOD === "today") { renderToday(DATA); renderDevice(DATA); }
         dispatchEvent(new CustomEvent("vitals:period", { detail: { period: PERIOD, date: ADATE } }));
-      } catch { /* next tick */ }
-    }, 60_000);
+      } catch { /* next tick */ } finally { refreshing = false; }
+    };
+    setInterval(refresh, 60_000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() - refreshedAt > 10_000) { pollLive(); refresh(); } });
   });
+})();
+
+/* ───────── Silent alarm (Today). Needs the local strap service, so the card stays
+   hidden where /api/alarm does not exist (the cloud copy of this app). ───────── */
+(() => {
+  const card = document.getElementById("alarm-card");
+  if (!card) return;
+  const $a = (id) => document.getElementById(id);
+  const when = new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  const post = (url, body) => fetch(url, { method: "POST", headers: { "X-Vitals": "1", "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+
+  function show(s) {
+    card.hidden = false;
+    let t;
+    if (!s.enabled) t = "Off. When set, the strap vibrates at that time. No sound.";
+    else {
+      t = `Set for ${s.time} ${s.daily ? "every day" : "once"}. Next: ${when.format(new Date(s.next * 1000))}. `;
+      t += s.on_strap ? "Saved on the strap, so it rings even if this Mac is off."
+        : s.daemon ? "Not on the strap yet: it is added as soon as the strap connects."
+        : "Not on the strap yet: the strap service is not running.";
+      if (!card.contains(document.activeElement)) { $a("alarm-time").value = s.time; $a("alarm-daily").checked = s.daily; }
+    }
+    $a("alarm-status").textContent = t;
+  }
+  async function load() {
+    try {
+      const r = await fetch("/api/alarm", { cache: "no-store" });
+      if (r.ok) show(await r.json());
+    } catch { /* not the local dashboard: keep the card hidden */ }
+  }
+  async function send(body) {
+    $a("alarm-status").textContent = "Saving…";
+    try {
+      const r = await post("/api/alarm", body);
+      const j = await r.json();
+      if (r.ok) show(j); else $a("alarm-status").textContent = j.error || "Could not save the alarm.";
+    } catch { $a("alarm-status").textContent = "Could not reach the dashboard."; }
+  }
+  $a("alarm-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    send({ time: $a("alarm-time").value, daily: $a("alarm-daily").checked });
+  });
+  $a("alarm-off").addEventListener("click", () => send({ off: true }));
+  $a("alarm-buzz").addEventListener("click", async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    try {
+      const r = await post("/api/buzz");
+      const j = await r.json();
+      $a("alarm-status").textContent = r.ok ? "Buzz sent. You should feel a short vibration."
+        : j.error || "The strap is not connected right now, so it could not buzz.";
+    } catch { $a("alarm-status").textContent = "Could not reach the dashboard."; }
+    b.disabled = false;
+    setTimeout(load, 5000);
+  });
+  load();
+  setInterval(() => { if (!document.hidden) load(); }, 60_000);
 })();
