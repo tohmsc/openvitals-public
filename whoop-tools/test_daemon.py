@@ -3,12 +3,12 @@
 
 Run:  .venv/bin/python -m unittest test_daemon -v
 """
-import asyncio, os, struct, tempfile, types, unittest
+import asyncio, json, os, struct, tempfile, time, types, unittest
 
 _TMP = tempfile.mkdtemp(prefix="whoop-test-")
 os.environ["WHOOP_DB"] = os.path.join(_TMP, "test.db")
 
-import db, whoop, collector, daemon, decode  # noqa: E402
+import db, whoop, collector, daemon, decode, alarm  # noqa: E402
 
 collector.LIVE_LOCK = daemon.LOCK = os.path.join(_TMP, ".live.lock")
 
@@ -31,7 +31,8 @@ class FakeStrap:
     def __init__(self, addr):
         self.addr = addr
         self.client = types.SimpleNamespace(is_connected=True)
-        self.on_realtime = self.raw_sink = None
+        self.on_realtime = self.raw_sink = self.on_battery = self.on_event = None
+        self.calls = []
         self.drains = self.sent = 0
         self.realtime_on = 0
         self._task = None
@@ -63,6 +64,45 @@ class FakeStrap:
                 self.client.is_connected = False
             await asyncio.sleep(0.005)
 
+    async def battery(self):
+        self.on_battery(88.5)
+
+    async def pack_battery(self):
+        return 56
+
+    # ---- haptics and alarm, answering like the real 4.0 did ----
+    alarm_works = True               # False: the strap answers SET_ALARM but never stores it
+    strap_alarm = None               # what the strap holds (unix seconds)
+    buzzes = []                      # (pattern, loops) of every buzz, across all fake straps
+
+    async def buzz(self, pattern=2, loops=1):
+        FakeStrap.buzzes.append((pattern, loops))
+        if self.on_event:
+            self.on_event(whoop.E_HAPTICS_FIRED, bytes([0x30, 0, whoop.E_HAPTICS_FIRED]))
+        return {"op": whoop.C_RUN_HAPTICS, "status": 2, "ok": False, "body": b""}
+
+    async def stop_buzz(self):
+        return {"op": whoop.C_STOP_HAPTICS, "status": 1, "ok": True, "body": b""}
+
+    async def set_alarm(self, epoch):
+        self.calls.append(("set", epoch))
+        if self.alarm_works:
+            FakeStrap.strap_alarm = int(epoch)
+        return {"op": whoop.C_SET_ALARM, "status": 1, "ok": True, "body": b""}
+
+    async def get_alarm(self):
+        self.calls.append(("get",))
+        return FakeStrap.strap_alarm
+
+    async def disable_alarm(self):
+        self.calls.append(("disable",))
+        FakeStrap.strap_alarm = None
+        return {"op": whoop.C_DISABLE_ALARM, "status": 1, "ok": True, "body": b""}
+
+    async def run_alarm(self):
+        self.calls.append(("ring",))
+        return {"op": whoop.C_RUN_ALARM, "status": 1, "ok": True, "body": b""}
+
     async def drain(self, timeout=90):
         self.drains += 1
         self.raw_sink(whoop.CH_DATA, metadata(1))
@@ -92,8 +132,11 @@ class DaemonTest(unittest.TestCase):
     def setUp(self):
         FakeStrap.made = []
         FakeStrap.drop_after = None
+        FakeStrap.buzzes = []
+        FakeStrap.strap_alarm = None
+        FakeStrap.alarm_works = True
         c = db.connect()
-        for t in ("ble_hr", "ble_raw", "clock_sync", "sync_state"):
+        for t in ("ble_hr", "ble_raw", "clock_sync", "sync_state", "host_log", "strap_cmd"):
             c.execute(f"DELETE FROM {t}")
         c.commit()
 
@@ -142,6 +185,103 @@ class DaemonTest(unittest.TestCase):
         c = db.connect()
         self.assertGreater(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 5)
         self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_raw").fetchone()["n"], 0)
+
+    # ---- buzz and alarm requests from other programs ----
+    def test_runs_a_queued_buzz(self):
+        c = db.connect()
+        rid = alarm.request(c, "buzz", {"pattern": 2, "loops": 1})   # what the dashboard does
+        asyncio.run(run_for(make(), 0.2))
+        self.assertEqual(FakeStrap.buzzes, [(2, 1)])                 # run once, not every tick
+        self.assertEqual(alarm.result(c, rid)["status"], "done")
+        self.assertIn("haptics fired", db.get_state(c, alarm.LAST))  # the strap's event is kept
+
+    def test_buzz_queued_while_the_daemon_runs(self):
+        async def ask(d):
+            await asyncio.sleep(0.1)
+            alarm.request(db.connect(), "buzz", {"pattern": 2, "loops": 2})
+        asyncio.run(run_for(make(), 0.2, during=ask))
+        self.assertEqual(FakeStrap.buzzes, [(2, 2)])
+
+    def test_other_programs_can_queue_while_the_live_stream_pauses(self):
+        """The strap pauses live HR while it vibrates but still sends events. Those go into
+        ble_raw; the daemon must not keep that write open, or the dashboard's request waits."""
+        class EventsOnly(FakeStrap):
+            async def _emit(self):
+                while self.client.is_connected:
+                    self.raw_sink(whoop.CH_EVENT, bytes([whoop.T_EVENT, 0, whoop.E_HAPTICS_ENDED, 0]))
+                    await asyncio.sleep(0.05)
+        d = make()
+        d.strap = EventsOnly
+        got = []
+
+        def insert():
+            import sqlite3
+            c = sqlite3.connect(db.DB_PATH, timeout=0.5)
+            try:
+                c.execute("INSERT INTO strap_cmd(ts,kind) VALUES(?, 'stop')", (time.time(),))
+                c.commit()
+                got.append("ok")
+            except sqlite3.OperationalError as ex:
+                got.append(str(ex))
+
+        async def ask(d):
+            await asyncio.sleep(0.15)
+            await asyncio.to_thread(insert)
+        asyncio.run(run_for(d, 0.3, during=ask))
+        self.assertEqual(got, ["ok"])
+
+    def test_a_stale_buzz_is_dropped_not_run_late(self):
+        c = db.connect()
+        c.execute("INSERT INTO strap_cmd(ts,kind,arg) VALUES(?,?,?)",
+                  (time.time() - alarm.BUZZ_TTL - 5, "buzz", "{}"))
+        c.commit()
+        asyncio.run(run_for(make(), 0.15))
+        self.assertEqual(FakeStrap.buzzes, [])
+        self.assertEqual(c.execute("SELECT status FROM strap_cmd").fetchone()["status"], "expired")
+
+    def test_a_bad_request_does_not_stop_the_stream(self):
+        c = db.connect()
+        alarm.request(c, "reboot")                                   # not something we send
+        asyncio.run(run_for(make(), 0.2))
+        self.assertEqual(len(FakeStrap.made), 1)
+        self.assertEqual(c.execute("SELECT status FROM strap_cmd").fetchone()["status"], "failed")
+        self.assertGreater(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 5)
+
+    def test_arms_the_strap_alarm_and_clears_it(self):
+        c = db.connect()
+        alarm.set_alarm(c, "07:00")
+        asyncio.run(run_for(make(), 0.15))
+        want = alarm.desired(alarm.get(c))
+        self.assertEqual(FakeStrap.strap_alarm, want)
+        self.assertTrue(alarm.status(c)["on_strap"])
+        calls = FakeStrap.made[0].calls
+        self.assertEqual(calls.count(("set", want)), 1)              # armed once, then left alone
+
+        async def off(d):
+            await asyncio.sleep(0.05)
+            alarm.turn_off(db.connect())
+        asyncio.run(run_for(make(), 0.15, during=off))
+        self.assertIsNone(FakeStrap.strap_alarm)
+        self.assertFalse(alarm.status(c)["enabled"])
+
+    def test_rearms_for_tomorrow_after_the_alarm_rang(self):
+        c = db.connect()
+        alarm.set_alarm(c, "07:00")
+        past = time.time() - 60                                      # today's alarm already rang
+        db.set_state(c, alarm.ARMED, json.dumps({"epoch": past, "ok": True, "ts": past}))
+        asyncio.run(run_for(make(), 0.15))
+        self.assertEqual(FakeStrap.strap_alarm, alarm.desired(alarm.get(c)))
+        self.assertGreater(FakeStrap.strap_alarm, time.time())
+
+    def test_daemon_rings_itself_if_the_strap_does_not_keep_the_alarm(self):
+        FakeStrap.alarm_works = False
+        c = db.connect()
+        db.set_state(c, alarm.KEY, json.dumps({"enabled": True, "time": "07:00", "daily": False,
+                                                "epoch": time.time() + 0.1}))
+        asyncio.run(run_for(make(), 0.4))
+        self.assertFalse(alarm.status(c, now=time.time() - 1)["on_strap"])
+        calls = FakeStrap.made[0].calls
+        self.assertEqual(calls.count(("ring",)), 1)                  # rang once at the time
 
     def test_reconnects_after_the_link_drops(self):
         FakeStrap.drop_after = 5
@@ -235,6 +375,58 @@ class DaemonTest(unittest.TestCase):
         asyncio.run(run_for(d, 0.2, during))
         self.assertGreaterEqual(len(FakeStrap.made), 2)
         self.assertGreater(FakeStrap.made[-1].sent, 0)      # the fresh link streams
+
+    def test_host_log_says_linked_and_asleep(self):
+        d = make()
+        d.restart = lambda why: None
+
+        async def during(d):
+            await asyncio.sleep(0.1)
+            d._skew -= 3600                                 # as if the Mac had slept an hour
+        asyncio.run(run_for(d, 0.25, during))
+        c = db.connect()
+        rows = [dict(r) for r in c.execute("SELECT start, end, state FROM host_log ORDER BY start")]
+        nap = [r for r in rows if r["state"] == "asleep"]
+        self.assertEqual(len(nap), 1)
+        self.assertAlmostEqual(nap[0]["end"] - nap[0]["start"], 3600, delta=5)
+        linked = [r for r in rows if r["state"] == "linked"]
+        # (the fake sleep is backdated, so only the order around the wake can be checked)
+        self.assertTrue(any(r["end"] <= nap[0]["end"] for r in linked))     # linked before the wake...
+        self.assertTrue(any(r["start"] >= nap[0]["end"] for r in linked))   # ...and again after it
+
+    def test_a_night_with_the_mac_asleep_is_filled_in_after_the_wake(self):
+        """The strap records all night on its own; after the wake the daemon reconnects, drains
+        it, and decode fills ble_hr: the night ends up with no gap."""
+        import time, metrics
+        night = int(time.time()) - 8 * 3600
+        N = 900
+
+        class Night(FakeStrap):
+            async def drain(self, timeout=90):
+                self.drains += 1
+                if len(FakeStrap.made) > 1:                  # the link after the wake hands over the night
+                    self.raw_sink(whoop.CH_DATA, metadata(1))
+                    for s in range(N):
+                        self.raw_sink(whoop.CH_DATA, DecodeTest.history(night + s, 50 + s % 7, rr=(1100,)))
+                    self.raw_sink(whoop.CH_DATA, metadata(2, trim=9))
+                self.raw_sink(whoop.CH_DATA, metadata(3))
+                return True
+        d = make()
+        d.strap = Night
+        d.restart = lambda why: None
+        c = db.connect()
+        c.execute("DELETE FROM host_log"); c.commit()
+
+        async def during(d):
+            await asyncio.sleep(0.1)
+            d._skew -= 8 * 3600                             # the Mac slept through the night
+        asyncio.run(run_for(d, 0.3, during))
+        self.assertGreaterEqual(len(FakeStrap.made), 2)
+        decode.run(quiet=True)
+        cov = metrics.coverage(c, night, night + N)
+        self.assertEqual(cov["recorded_s"], N)
+        self.assertEqual(cov["gaps"], [])
+        self.assertGreaterEqual(int(db.get_state(c, "history_ts")), night + N - 1)
 
     def test_restarts_if_the_strap_stays_unreachable_after_a_wake(self):
         """The 2026-11-19 failure: after sleep the scan never finds the strap (it is there)."""
@@ -435,7 +627,9 @@ class DecodeTest(unittest.TestCase):
         got = [(r["ts"], r["hr"], r["rr_ms"]) for r in c.execute("SELECT * FROM ble_hr WHERE ts < ? ORDER BY ts", (T + 3,))]
         self.assertEqual(got, [(T + 0.0, 60, "1000.0"), (T + 1.0, 61, "1000.0"), (T + 2.0, 62, "1000.0")])
         self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 6)   # 3 live + 3 backfilled
-        self.assertEqual(float(db.get_state(c, "cloud_hr_ts")), T - 1)        # cloud push will pick them up
+        self.assertEqual(float(db.get_state(c, "cloud_hr_ts")), T + 5.13)     # the watermark stays...
+        self.assertEqual([r["ts"] for r in c.execute("SELECT ts FROM cloud_hr_pending ORDER BY ts")],
+                         [T + 0.0, T + 1.0, T + 2.0])                       # ...and exactly these go up
         decode.run(full=True, quiet=True)                    # rebuilding adds nothing twice
         self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 6)
 
@@ -460,6 +654,88 @@ class DecodeTest(unittest.TestCase):
                          c.execute("SELECT MAX(rowid) m FROM ble_raw").fetchone()["m"])
         c.execute("DROP TABLE device_logs"); c.commit()
         c.executescript(decode.EXTRA)
+
+    def test_a_failing_part_does_not_hold_back_heart_rate(self):
+        """Whatever goes wrong with logs, battery or samples, the heart rate still gets in and
+        the watermark moves (one stuck pass once held back a whole night)."""
+        c = db.connect()
+        for t in ("ble_raw", "ble_hr", "sync_state"):
+            c.execute(f"DELETE FROM {t}")
+        c.executescript(decode.EXTRA)
+        c.execute("CREATE TRIGGER boom BEFORE INSERT ON device_logs BEGIN SELECT RAISE(ABORT, 'boom'); END")
+        c.commit()
+        T = 1_795_060_000
+        self.load([console(b"31, 2000: BLE: connected. 31, 2001: BLE: ok. "), self.history(T, 52, rr=(1200,))], c)
+        try:
+            decode.run(quiet=True)
+            self.assertEqual([r["hr"] for r in c.execute("SELECT hr FROM ble_hr")], [52])
+            self.assertEqual(int(db.get_state(c, "decode_rowid")),
+                             c.execute("SELECT MAX(rowid) m FROM ble_raw").fetchone()["m"])
+            self.assertEqual(c.execute("SELECT COUNT(*) n FROM device_logs").fetchone()["n"], 0)
+        finally:
+            c.execute("DROP TRIGGER boom"); c.commit()
+
+    def test_renumbered_raw_frames_are_not_skipped(self):
+        """If ble_raw is emptied, SQLite numbers new frames from 1 again, under the watermark."""
+        c = db.connect()
+        for t in ("ble_raw", "ble_hr", "sync_state"):
+            c.execute(f"DELETE FROM {t}")
+        T = 1_795_070_000
+        for s in range(5):
+            c.execute("INSERT INTO ble_raw(ts,channel,ptype,hex) VALUES(?,?,?,?)",
+                      (100.0 + s, "0005", 0x2F, self.history(T + s, 60).hex()))
+        c.commit()
+        decode.run(quiet=True)
+        self.assertEqual(int(db.get_state(c, "decode_rowid")), 5)
+        c.execute("DELETE FROM ble_raw")                     # a cleanup or a restored copy
+        for s in range(2):                                  # new frames get rowid 1 and 2
+            c.execute("INSERT INTO ble_raw(ts,channel,ptype,hex) VALUES(?,?,?,?)",
+                      (200.0 + s, "0005", 0x2F, self.history(T + 100 + s, 70).hex()))
+        c.commit()
+        decode.run(quiet=True)
+        self.assertEqual([r["hr"] for r in c.execute("SELECT hr FROM ble_hr WHERE ts >= ?", (T + 100,))], [70, 70])
+        self.assertEqual(int(db.get_state(c, "decode_rowid")), 2)
+        decode.run(quiet=True)                               # and the normal path is unchanged
+        self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 7)
+
+    def test_replayed_old_records_fill_only_their_gaps(self):
+        """19 Nov 2026 the strap started over from the start of its memory and re-sent records
+        from June 2025 (older sequence numbers, real timestamps). They land where they belong,
+        once, without moving 'how far history has been read' back or re-sending the cloud."""
+        c = db.connect()
+        c.executescript(decode.EXTRA)
+        for t in ("ble_raw", "ble_hr", "sync_state", "cloud_hr_pending"):
+            c.execute(f"DELETE FROM {t}")
+        NOW, OLD = 1_795_075_000, 1_749_703_482            # 19 Nov 2026, 12 Jun 2025
+        self.load([self.history(NOW + s, 70) for s in range(3)], c)
+        decode.run(quiet=True)
+        db.set_state(c, "cloud_hr_ts", NOW + 2)              # pushed already
+        replay = [self.history(OLD + s, 50) for s in range(4)] + [self.history(NOW + 1, 99)]
+        self.load(replay, c)
+        decode.run(quiet=True)
+        self.load(replay, c)                                 # and the same replay once more
+        decode.run(quiet=True)
+        got = [(r["ts"], r["hr"]) for r in c.execute("SELECT ts,hr FROM ble_hr ORDER BY ts")]
+        self.assertEqual(got, [(OLD + s, 50) for s in range(4)] + [(NOW + s, 70) for s in range(3)])
+        self.assertEqual(int(db.get_state(c, "history_ts")), NOW + 2)
+        self.assertEqual(float(db.get_state(c, "cloud_hr_ts")), NOW + 2)
+        self.assertEqual(c.execute("SELECT COUNT(*) n FROM cloud_hr_pending").fetchone()["n"], 4)
+
+    def test_late_heart_rate_is_pushed_once(self):
+        import cloud_sync
+        c = db.connect()
+        c.executescript(decode.EXTRA)
+        for t in ("ble_hr", "cloud_hr_pending"):
+            c.execute(f"DELETE FROM {t}")
+        c.executemany("INSERT INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,'')", [(10.0, 50), (11.0, 51), (99.0, 60)])
+        c.executemany("INSERT INTO cloud_hr_pending(ts) VALUES(?)", [(10.0,), (11.0,), (12.0,)])  # 12: gone since
+        c.commit()
+        sent = []
+        d1 = types.SimpleNamespace(upsert=lambda table, cols, rows, chunk=100: sent.extend((r["ts"], r["hr"]) for r in rows))
+        self.assertEqual(cloud_sync.push_late_hr(c, d1, batch=2), 2)
+        self.assertEqual(sent, [(10.0, 50), (11.0, 51)])
+        self.assertEqual(c.execute("SELECT COUNT(*) n FROM cloud_hr_pending").fetchone()["n"], 0)
+        self.assertEqual(cloud_sync.push_late_hr(c, d1), 0)
 
     def test_other_record_versions_are_not_read_as_heart_rate(self):
         # version 25 is a block of raw sensor samples: byte 14 there is not a heart rate
@@ -498,8 +774,52 @@ class DecodeTest(unittest.TestCase):
         decode.run(quiet=True)
         order = [r["soc_pct"] for r in c.execute("SELECT soc_pct FROM device_soc ORDER BY COALESCE(seen,0), rtc")]
         self.assertEqual(order[-2:], [40.0, 95.0])
+
+    def test_log_lines_never_set_the_battery(self):
+        # a history drain replays months-old console logs (seen: 47% from June 2025 arriving
+        # while the strap sat at 100% on the charger), and a cut line read "SOC report: 9 "
         import metrics
-        self.assertEqual(metrics.battery(c), 95.0)
+        c = db.connect()
+        for t in ("ble_raw", "sync_state", "device_soc"):
+            c.execute(f"DELETE FROM {t}")
+        self.load([console(b"32, 2330008419: SUPERVISOR: SOC report: 47.27. 32, 80747375: SUPERVISOR: SOC report: 9 "
+                           b"31, 80747380: BLE: x. 32, 2: X: y. ")], c)
+        decode.run(quiet=True)
+        self.assertEqual([r["soc_pct"] for r in c.execute("SELECT soc_pct FROM device_soc")], [47.27])
+        self.assertIsNone(metrics.battery(c))
+        db.set_state(c, "battery_now", json.dumps({"soc": 47.27, "ts": time.time()}))   # old decode.py
+        self.assertIsNone(metrics.battery(c))
+
+
+class BatteryTest(unittest.TestCase):
+    def test_parses_the_strap_reply(self):
+        # captured 2026-11-19 on the charger: 24 <seq> 1a | 00 01 e8 03 ...
+        self.assertEqual(whoop.parse_battery(bytes.fromhex("24001a0001e80300000000")), 100.0)
+        self.assertEqual(whoop.parse_battery(bytes.fromhex("24001a0001d401")), 46.8)
+        self.assertIsNone(whoop.parse_battery(bytes.fromhex("24001a00")))
+        self.assertIsNone(whoop.parse_battery(bytes.fromhex("24001a0001ffff")))
+
+    def test_daemon_stores_the_strap_reading(self):
+        import metrics
+        FakeStrap.made = []
+        d = make()
+        asyncio.run(run_for(d, 0.3))
+        self.assertEqual(metrics.battery(db.connect()), 88.5)
+        self.assertEqual(metrics.pack_battery(db.connect()), 56)
+
+    def test_a_failed_pack_read_keeps_the_link(self):
+        import metrics
+
+        class NoPack(FakeStrap):
+            async def pack_battery(self):
+                raise OSError("characteristic not found")
+        FakeStrap.made = []
+        d = daemon.Daemon(strap=NoPack, find=None, addr=lambda: "FAKE-ADDR")
+        d.jobs = []
+        d.settle, d.tick, d.retry_min, d.retry_max = 0, 0.01, 0.01, 0.02
+        asyncio.run(run_for(d, 0.3))
+        self.assertEqual(len(FakeStrap.made), 1)            # one link, never dropped
+        self.assertEqual(metrics.battery(db.connect()), 88.5)
 
 
 if __name__ == "__main__":

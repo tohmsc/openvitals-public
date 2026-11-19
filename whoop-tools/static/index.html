@@ -30,6 +30,7 @@
 <script src="/static/chart.umd.js" defer></script>
 <script src="/static/app.js" defer></script>
 <script src="/static/heart.js" defer></script>
+<script src="/static/stress.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -78,7 +79,7 @@
       <div class="sidecard">
         <div class="sidecard__row"><span>Strap</span><span id="side-ble">—</span></div>
         <div class="sidecard__row"><span>Archive</span><span id="side-api">—</span></div>
-        <div class="sidecard__row"><span>Battery</span><span id="side-bat">—</span></div>
+        <div class="sidecard__row"><span>Strap battery</span><span id="side-bat">—</span></div>
         <button class="resync" type="button" data-resync><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 10a6.5 6.5 0 0 1-11.6 4M3.5 10a6.5 6.5 0 0 1 11.6-4"/><path d="M15.5 2.8v3.4h-3.4M4.5 17.2v-3.4h3.4"/></svg><span data-resync-label>Resync strap</span></button>
         <p class="sync-msg" data-sync-msg aria-live="polite"></p>
       </div>
@@ -233,6 +234,48 @@
             </header>
             <div class="chart chart--md"><canvas id="c-today" role="img"></canvas></div>
           </article>
+          <article class="card span-12" id="alerts-card" aria-labelledby="alerts-h" hidden>
+            <header class="card__head">
+              <div>
+                <h3 id="alerts-h" class="card__title">Health alerts</h3>
+                <p class="card__hint">Several nights in a row away from your usual</p>
+              </div>
+            </header>
+            <ul class="hals" id="alerts-list"></ul>
+            <p class="fine" id="alerts-note"></p>
+          </article>
+          <article class="card span-12" aria-labelledby="stress-h">
+            <header class="card__head">
+              <div>
+                <h3 id="stress-h" class="card__title">Stress</h3>
+                <p class="card__stat" id="stress-meta"></p>
+              </div>
+              <ul class="legend" aria-label="Chart key">
+                <li><span class="line-key" style="--c:var(--good)"></span>Low, under 1</li>
+                <li><span class="line-key" style="--c:var(--fair)"></span>Medium, 1–2</li>
+                <li><span class="line-key" style="--c:var(--low)"></span>High, 2–3</li>
+              </ul>
+            </header>
+            <p class="stress" id="stress-now" aria-live="polite"></p>
+            <div class="chart chart--sm"><canvas id="c-stress" role="img"></canvas></div>
+            <p class="fine"><span id="stress-base"></span> Heart rate up and HRV down while you sit still, next to your own calm, on a 0–3 scale. Only scored while you're still and awake. Standing up, talking, coffee and stress all read the same here: it shows how activated you are, not why. Not a medical device.</p>
+          </article>
+          <!-- Silent alarm: only on the local dashboard (needs the strap service); hidden elsewhere -->
+          <article class="card span-12" aria-labelledby="alarm-h" id="alarm-card" hidden>
+            <header class="card__head">
+              <div>
+                <h3 id="alarm-h" class="card__title">Silent alarm</h3>
+                <p class="card__stat" id="alarm-status" aria-live="polite"></p>
+              </div>
+            </header>
+            <form class="alarm" id="alarm-form">
+              <label class="alarm__field"><span>Wake at</span><input type="time" id="alarm-time" required value="07:00"></label>
+              <label class="alarm__check"><input type="checkbox" id="alarm-daily" checked> Every day</label>
+              <button class="btn btn--primary" type="submit">Set alarm</button>
+              <button class="btn" type="button" id="alarm-off">Turn off</button>
+              <button class="btn btn--ghost" type="button" id="alarm-buzz">Test buzz</button>
+            </form>
+          </article>
         </div>
       </section>
 
@@ -251,7 +294,7 @@
         <div class="section__head">
           <div>
             <h2 id="overview-h" class="title" data-archive-day>Day</h2>
-            <p class="section__meta">Scores WHOOP computed for this day</p>
+            <p class="section__meta">WHOOP's scores, or strap estimates where marked</p>
           </div>
         </div>
         <div class="grid">
@@ -364,7 +407,7 @@
         <div class="section__head">
           <div>
             <h2 id="sleep-h" class="title">Sleep</h2>
-            <p class="section__meta">Stage breakdown scored by WHOOP</p>
+            <p class="section__meta">Stages scored by WHOOP; strap nights show asleep and awake only</p>
           </div>
         </div>
         <div class="grid">
@@ -455,16 +498,23 @@
             <h2 id="device-h" class="title">Device</h2>
             <p class="section__meta">Decoded directly from the strap over Bluetooth</p>
           </div>
+          <p class="card__hint" id="device-state"><span class="dot" data-state="off" aria-hidden="true"></span><span id="device-state-text">Not connected</span></p>
         </div>
         <div class="grid">
           <div class="stack span-4">
             <article class="card" aria-labelledby="bat-h">
               <header class="card__head">
-                <h3 id="bat-h" class="card__title">Strap battery</h3>
-                <span class="card__hint">Firmware SOC reports</span>
+                <h3 id="bat-h" class="card__title">Battery</h3>
+                <span class="card__hint">Asked from the strap</span>
               </header>
               <div class="battery" id="battery"></div>
-              <div class="chart chart--xs"><canvas id="c-soc" role="img"></canvas></div>
+            </article>
+            <article class="card" aria-labelledby="cov-h">
+              <header class="card__head">
+                <h3 id="cov-h" class="card__title">Heart rate coverage</h3>
+                <span class="card__hint">Share of each day recorded</span>
+              </header>
+              <ul class="coverage" id="coverage"></ul>
             </article>
             <article class="card" aria-labelledby="rec-count-h">
               <header class="card__head">

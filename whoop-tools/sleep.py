@@ -5,15 +5,30 @@ the stored history, per minute in motion_min, filled by decode.py) and heart rat
 The method is wrist actigraphy, which is how sleep labs score wrist trackers, plus a heart-rate check:
   1. Each minute gets a movement score: the movement in the 7 minutes around it, weighted
      toward the minute itself (Cole-Kripke weights).
-  2. A minute is asleep when that score is low and the heart rate is close to the night's low.
-     Awake runs of 1-2 minutes inside sleep (turning over) count as sleep.
-  3. Asleep runs of 10+ minutes are sleep blocks. Blocks less than 30 minutes apart belong to
+  2. A minute is asleep when that score is low and the heart rate is not far (30 bpm) above the
+     night's low. Awake runs of 1-2 minutes inside sleep (turning over) count as sleep.
+  3. Asleep runs of 10+ minutes are sleep blocks. Blocks less than 60 minutes apart belong to
      the same sleep, and the night is the group with the most sleep. It starts at its first
      block of 20+ minutes and ends at the end of its last block.
   4. Inside it, 5+ minutes in a row awake is a wake-up.
-How close: wrist actigraphy usually places sleep onset within 10-20 minutes of a lab sleep study.
-Lying completely still while awake reads as asleep. This strap's version is not yet checked
-against a reference; tell it when it is wrong and the thresholds below are what to tune.
+
+How close, checked against a sleep lab (2026-11-19, fit/sleep_psg/): the public PhysioNet
+dataset of Walch et al. 2019 (31 adults, one polysomnography night each, Apple Watch movement
+and heart rate turned into exactly this module's per-minute inputs). Held-out numbers (each
+person scored with the HR_ABOVE x JOIN setting chosen on the other 30), mean absolute error:
+    falling asleep  6.5 min (median -1)    waking up  33 min (median -0.5; 6 of 31 off by 40+,
+                                           two by 4-5 h: gaps / a restless end in the watch data)
+    time asleep     43 min (median -4)     per 30 s:  86% right, 88% of sleep, 67% of wake found
+    wake-ups (5+ min) about 3 too many a night
+The settings before this check (heart rate 15 bpm over the low, blocks joined within 30 min)
+scored 28 / 40 / 73 min and 78% on the same nights: REM sleep raises heart rate past 15 bpm,
+which split nights in two and started some 2-3 hours late. Re-run with the watch's 1 Hz signal
+smoothed instead (the strap's own filtering is unknown) the held-out errors are 18 / 25 / 45 min
+and 88%. The movement threshold STILL was not tuned: its scale depends on the device, and 0.02
+sits between the best values for the two versions of the watch signal (0.015 and 0.025).
+Caveats: a lab night starts at lights-out, so lying still in bed before sleeping is barely
+tested; lying completely still while awake reads as asleep (wake is the weak side, as for all
+wrist actigraphy); not yet checked on this strap's own nights.
 
     python sleep.py            # recompute recent nights and print them
     python sleep.py 2026-11-19 # one night (the date you woke up)
@@ -22,11 +37,11 @@ import json, statistics, sys, time
 import db, metrics
 
 STILL = 0.02          # weighted movement per minute (g per one-second step) below this is still
-HR_ABOVE = 15         # still, but heart rate this far over the night's low: awake
+HR_ABOVE = 30         # still, but heart rate this far over the night's low: awake (15 cut REM sleep out)
 FILL = 2              # awake runs this short inside sleep are turning over, not waking
 MIN_BLOCK = 10        # minutes asleep in a row to count as a sleep block
 FIRST_BLOCK = 20      # the night starts with a block at least this long
-JOIN = 30             # blocks closer than this many minutes are the same sleep
+JOIN = 60             # blocks closer than this many minutes are the same sleep
 WAKEUP = 5            # minutes awake in a row that count as waking up
 DONE_AFTER = 30       # minutes of movement data after the last block before the night counts as over
 UP_AFTER = 20         # ...or minutes of live heart rate after it, clearly above the night's low

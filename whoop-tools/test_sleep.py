@@ -73,6 +73,28 @@ class SleepTest(unittest.TestCase):
         n = sleep.night(self.c, MORNING, now=at("09:00"))
         self.assertLessEqual(abs(n["onset"] - at("23:00")), 5 * 60)
 
+    def test_dreaming_heart_rate_is_still_sleep(self):
+        """REM sleep: lying still with heart rate 20 over the night's low (the lab check found the
+        old 15 bpm rule cut such stretches out and started nights hours late)."""
+        self.span(at("19:00"), at("23:00"), MOVING, 75)
+        self.span(at("23:00"), at("07:00"), STILL, 50)
+        self.span(at("23:20"), at("00:10"), STILL, 70)         # 50 min of still, raised heart rate
+        self.span(at("07:00"), at("08:00"), MOVING, 70)
+        n = sleep.night(self.c, MORNING, now=at("09:00"))
+        self.assertLessEqual(abs(n["onset"] - at("23:00")), 5 * 60)
+        self.assertEqual(n["wakeups"], 0)
+
+    def test_long_wake_in_the_night_does_not_split_it(self):
+        self.span(at("19:00"), at("23:00"), MOVING, 75)
+        self.span(at("23:00"), at("02:00"), STILL, 50)
+        self.span(at("02:00"), at("02:45"), MOVING, 70)        # up for 45 minutes
+        self.span(at("02:45"), at("07:00"), STILL, 50)
+        self.span(at("07:00"), at("08:00"), MOVING, 70)
+        n = sleep.night(self.c, MORNING, now=at("09:00"))
+        self.assertLessEqual(abs(n["onset"] - at("23:00")), 5 * 60)
+        self.assertLessEqual(abs(n["wake"] - at("07:00")), 5 * 60)
+        self.assertEqual(n["wakeups"], 1)
+
     def test_night_in_progress_until_the_morning_data_arrives(self):
         self.span(at("19:00"), at("23:00"), MOVING, 75)
         self.span(at("23:00"), at("05:00"), STILL, 50)        # the strap's history only reaches 05:00

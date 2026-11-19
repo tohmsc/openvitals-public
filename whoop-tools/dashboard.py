@@ -6,7 +6,7 @@ works fully offline. This file only serves it plus two JSON endpoints.
 """
 import json, time, os, sys, subprocess, threading
 from flask import Flask, jsonify, request, send_from_directory
-import db, learn, metrics, sleep
+import alerts, db, learn, metrics, scores, sleep, stress
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -24,6 +24,15 @@ def rows(c, q, *a):
 
 def _has(c, t):
     return c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone() is not None
+
+
+def _safe(fn, c):
+    """A new section failing must not take the whole summary down."""
+    try:
+        return fn(c)
+    except Exception as ex:          # noqa: BLE001
+        print(f"{fn.__module__}.{fn.__name__} error:", ex)
+        return None
 
 
 def _clean(s):
@@ -64,6 +73,7 @@ def summary():
         # same numbers the Telegram message uses (metrics.py), so the two never disagree
         "today": {k: stats.get(k) for k in ("rmssd", "n_rr", "resting", "high_s", "recorded_s")},
         "battery": metrics.battery(c),
+        "pack_battery": metrics.pack_battery(c),
         "personal": dict(learn.summary(c), text=learn.learned_text(c).replace("• ", "").split("\n"),
                          feel=learn.FEEL_WORD.get(feel["feel"]) if feel and feel["feel"] else None),
         "archive": {"start": arch["a"], "end": arch["b"]},
@@ -79,8 +89,15 @@ def summary():
         "cycle": rows(c, "SELECT start,end,strain,avg_hr,max_hr,kilojoule FROM api_cycle "
                          "WHERE strain IS NOT NULL ORDER BY start DESC LIMIT ?", HISTORY),
         "workout": workouts,
+        # strap estimates of the same scores (scores.py), only the ones that passed their checks
+        "estimates": scores.for_app(c),
+        # stress monitor (stress.py): today's 5-minute series, the reading now, the baseline used
+        "stress": _safe(stress.for_app, c),
+        # health alerts that are on (alerts.py): sustained changes against your usual
+        "alerts": _safe(alerts.active, c) or [],
         "live_hr": rows(c, "SELECT ts,hr FROM ble_hr ORDER BY ts DESC LIMIT 600"),
         "soc": soc,
+        "coverage": metrics.coverage_days(c, 7),     # how much of each day has heart rate, and why not
         "logs": logs,
         "sync": {"ble": float(last_ble) if last_ble else None, "api": db.get_state(c, "api_since")},
         "demo": DEMO,
@@ -154,6 +171,47 @@ def feel():
     c = db.connect()
     learn.record_feel(c, word)
     return jsonify({"feel": word, "thresholds": learn.thresholds(c)})
+
+
+@app.route("/api/alarm", methods=["GET", "POST"])
+def alarm_api():
+    """Silent alarm. GET: the alarm and whether the strap holds it.
+    POST {"time": "07:00", "daily": true} sets it; {"off": true} turns it off.
+    The daemon (which holds the strap) puts it on the strap within a few seconds."""
+    import alarm, collector
+    c = db.connect()
+    if request.method == "POST":
+        if request.headers.get("X-Vitals") != "1":
+            return jsonify({"error": "missing header"}), 403
+        if DEMO:
+            return jsonify({"error": "Demo database: the alarm is disabled."}), 409
+        body = request.get_json(silent=True) or {}
+        try:
+            if body.get("off"):
+                alarm.turn_off(c)
+            else:
+                alarm.set_alarm(c, body.get("time", ""), daily=bool(body.get("daily", True)))
+        except ValueError as ex:
+            return jsonify({"error": str(ex)}), 400
+        end = time.time() + 6                    # give the daemon a moment to put it on the strap
+        while collector.lock_holder() and alarm.due_for_sync(c) and time.time() < end:
+            time.sleep(0.3)
+    return jsonify(dict(alarm.status(c), daemon=bool(collector.lock_holder())))
+
+
+@app.route("/api/buzz", methods=["POST"])
+def buzz_api():
+    """Vibrate the strap once (a test). Runs through the daemon, which holds the strap."""
+    import alarm, collector
+    if request.headers.get("X-Vitals") != "1":
+        return jsonify({"error": "missing header"}), 403
+    if DEMO:
+        return jsonify({"error": "Demo database: no strap."}), 409
+    if not collector.lock_holder():
+        return jsonify({"error": "The strap service is not running, so nothing can reach the strap."}), 409
+    c = db.connect()
+    r = alarm.wait(c, alarm.request(c, "buzz", {"pattern": 2, "loops": 1}), timeout=8)
+    return jsonify({"status": r["status"]}), 200 if r["status"] == "done" else 504
 
 
 @app.route("/static/chart.js")

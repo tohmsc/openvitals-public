@@ -37,7 +37,7 @@ def env_keys(path):
 def main():
     print(f"whoop-tools folder: {HOME}\n")
     if not os.path.exists(os.path.join(HOME, "whoop.py")):
-        say("FAIL", "whoop.py not found here", "pass the path to the whoop-tools/ folder: python doctor.py ~/whoop-os-public/whoop-tools")
+        say("FAIL", "whoop.py not found here", "pass the path to the whoop-tools/ folder: python doctor.py ~/openvitals-public/whoop-tools")
         return
 
     # 1. Python + packages

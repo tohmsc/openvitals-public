@@ -1,6 +1,6 @@
 # Setup from a blank machine
 
-Every command, in order. Run them from `whoop-os-public/whoop-tools/` unless noted.
+Every command, in order. Run them from `openvitals-public/whoop-tools/` unless noted.
 `doctor.py` checks each step: `python ../skills/reverse-engineer-whoop/scripts/doctor.py .`
 
 ## What you need
@@ -16,8 +16,8 @@ Every command, in order. Run them from `whoop-os-public/whoop-tools/` unless not
 
 ## 1. Code and Python environment
 ```bash
-git clone https://github.com/tohmsc/whoop-os-public.git
-cd whoop-os-public/whoop-tools
+git clone https://github.com/tohmsc/openvitals-public.git
+cd openvitals-public/whoop-tools
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt     # bleak, Flask, pyserial, requests
 ```
@@ -97,8 +97,8 @@ done
 ```ini
 # ~/.config/systemd/user/whoop-collector.service
 [Service]
-WorkingDirectory=%h/whoop-os-public/whoop-tools
-ExecStart=%h/whoop-os-public/whoop-tools/.venv/bin/python collector.py --live 20
+WorkingDirectory=%h/openvitals-public/whoop-tools
+ExecStart=%h/openvitals-public/whoop-tools/.venv/bin/python collector.py --live 20
 
 # ~/.config/systemd/user/whoop-collector.timer
 [Timer]
@@ -109,8 +109,8 @@ WantedBy=timers.target
 
 # ~/.config/systemd/user/whoop-dashboard.service
 [Service]
-WorkingDirectory=%h/whoop-os-public/whoop-tools
-ExecStart=%h/whoop-os-public/whoop-tools/.venv/bin/python dashboard.py
+WorkingDirectory=%h/openvitals-public/whoop-tools
+ExecStart=%h/openvitals-public/whoop-tools/.venv/bin/python dashboard.py
 Restart=always
 [Install]
 WantedBy=default.target

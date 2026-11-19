@@ -122,6 +122,33 @@ def run_sleep():
         return False
     return True
 
+def run_signals():
+    # nightly skin temperature against your usual (signals.py), from strap_min and sleep_night
+    try:
+        import signals; signals.update()
+    except Exception as ex:
+        print("signals error:", ex)
+        return False
+    return True
+
+def run_stress():
+    # stress monitor (stress.py): today's 5-minute windows against your calm baseline
+    try:
+        import stress; stress.update()
+    except Exception as ex:
+        print("stress error:", ex)
+        return False
+    return True
+
+def run_scores():
+    # strap estimates of Strain, Sleep and Recovery for the last few days (scores.py)
+    try:
+        import scores; scores.update(days=3)
+    except Exception as ex:
+        print("scores error:", ex)
+        return False
+    return True
+
 def run_backup(keep=30):
     # local snapshot (encrypted if .backup_key present)
     try:

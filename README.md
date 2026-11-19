@@ -1,6 +1,7 @@
-# whoop-os — own your WHOOP data
+# OpenVitals — own your wearable data
 
-A local-first system to pull your own biometrics off a **WHOOP 4.0**: live heart rate /
+A local-first system to pull your own biometrics off your wearable. It currently supports the
+**WHOOP 4.0**: live heart rate /
 HRV straight off the strap over Bluetooth, your full history from the official WHOOP API,
 a lightweight localhost dashboard, and automatic encrypted + cloud backups. Everything
 stays on your machine.
@@ -9,6 +10,10 @@ stays on your machine.
 > device you don't own. It's **not a medical device** (fitness/self-tracking only), it's
 > reverse-engineered (a firmware update can change the protocol), and the computed scores
 > (Recovery/Strain/Sleep) come from WHOOP's cloud via the API, not the strap.
+>
+> OpenVitals is an independent project. It is not affiliated with, endorsed by, or sponsored
+> by WHOOP, Inc. "WHOOP" is a trademark of WHOOP, Inc. and is used here only to name the
+> device the software works with.
 
 ## Give it to an AI (easiest path)
 1. Clone this repo and open it in an AI coding agent (e.g. Claude Code) on the Mac with the
@@ -57,8 +62,39 @@ A local, offline app (`whoop-tools/static/`, vendored Chart.js, light/dark theme
   daytime HRV from RR intervals), compared against your archive baseline.
 - **Archive**: WHOOP cloud history behind a calendar. Every page is labelled with the day
   you're viewing: recovery, vitals, trends, sleep, activity and workouts for that day.
-- **Device**: strap battery, stored record counts, decoded firmware log, and a **Resync**
-  button that runs one collector cycle (or asks the running daemon to drain now).
+- **Device**: strap battery, **heart rate coverage** per day (how much of the day has heart
+  rate, how much is still on the strap, and why the longest gap is there), stored record
+  counts, decoded firmware log, and a **Resync** button that runs one collector cycle (or asks
+  the running daemon to drain now).
+
+## Keeping coverage high
+Strain, Sleep and Recovery are only shown when the strap recorded enough of the day (85%) or
+night. The morning Telegram message says when strain was held back and where the biggest
+gap was. How the data gets in:
+
+- The strap records every second on its own, worn or not near the Mac, and keeps days of
+  it (the exact capacity is not measured yet). When the Mac sees the strap again, the daemon reads everything stored and fills the
+  gaps. So **the Mac being asleep or you being out of range does not lose data**; it only
+  delays it until the next connection.
+- What does lose data:
+  - **The strap is off your wrist or charging.** It records nothing then. Charge it while
+    you sit at the desk (about an hour), not overnight or while you are out.
+  - **Another app reads the strap first.** The WHOOP phone app (or any second copy of this
+    daemon) takes the stored history and the strap then deletes it. Log out of the WHOOP app
+    on your phone, or turn its Bluetooth off, and run only one daemon.
+  - **The strap's memory fills up.** That takes days away from the Mac. Open the Mac near
+    the strap at least once every couple of days.
+- What makes data arrive sooner (so the morning message and today's numbers are complete):
+  - Keep the Mac within about 10 m of the strap: the bedroom at night is ideal.
+  - Plugged in, let the Mac stay awake with the screen off: System Settings > Battery >
+    Options > "Prevent automatic sleeping on power adapter when the display is off" (or run
+    `caffeinate -s` in a terminal). Leave the lid open: a closed lid puts a MacBook to sleep
+    unless an external display is attached.
+  - Leave Bluetooth on. After a wake the daemon reconnects by itself (and restarts itself if
+    macOS Bluetooth is stuck), usually within two minutes.
+- The Device page shows each day's coverage. "Still on the strap" means it will fill in at
+  the next sync; "nothing stored" means the strap was off your wrist, charging, or another
+  app read it.
 
 Screenshots below use the synthetic demo data:
 

@@ -189,6 +189,135 @@ reading, not as a verdict, and is not learned from. None of this detects or diag
 The chat that sends the pairing code becomes the only recipient; everyone else is ignored. Note
 this sends a health summary to Telegram's servers; bot chats are not end-to-end encrypted.
 
+## Strain, Sleep and Recovery from the strap (`scores.py`)
+
+WHOOP only scores data that goes through its app, so its scores stop where your archive
+stops. `scores.py` computes the same three scores from the strap, so the Day, Trends, Sleep
+and Activity pages keep going. Each one is a model. The built-in `v1` was fitted on the
+author's WHOOP archive and is used only on that archive; everyone else starts on `generic-v1`
+(see the next two sections). v1, checked against the days WHOOP scored:
+
+| Score | How | Error on days the fit never saw |
+|---|---|---|
+| Strain | Minutes in WHOOP's heart-rate-reserve zones, weighted, then WHOOP's patented arctan curve to 0-21 | 0.5 on workouts, 1.3 on whole days |
+| Sleep need / performance | WHOOP patent's strain term (exact), your baseline 7.9 h, 43% of last night's shortfall; since May 2025 blended with efficiency and consistency | 2.0 points (hours vs need), 4.9 (blend) |
+| Recovery | Night resting HR and HRV against your own last 30 nights, plus sleep performance | 7.1 points, right zone 86% of days |
+
+Sleep stages (deep, REM) and energy (kcal) are not estimated. Sleep timing comes from
+`sleep.py`.
+
+**Shown only when trusted.** A score shows in the app only when the data behind it passes its
+checks: at least 85% of the day recorded for strain, a finished day, a finished night for
+sleep, 3 of your own nights and a clean HRV reading for recovery. When a score is held back,
+the app says why.
+
+**Versions.** A model's numbers are frozen under a version name. Built-in ones live in
+`MODELS` (`v1`, `generic-v1`); models fitted by `calibrate.py` live in your database (table
+`score_models`). Estimates are stored per version, and a new version never overwrites an old
+one. Which one your install shows: the one chosen with `calibrate.py --use` (sync_state
+`scores_model`), else `v1` if your database holds the archive v1 was fitted on, else
+`generic-v1`. `python scores.py which` says which and why. The git tag `scores-v0` marks the
+code before any estimates existed.
+
+```bash
+python scores.py          # update the last 7 days and print them, with reasons for anything held back
+python scores.py check    # re-check the current version against the WHOOP archive
+python scores.py which    # which model this install uses, and why
+```
+The daemon runs it every 10 minutes. `cloud_sync.py` pushes the results to the phone dashboard.
+
+### First week without a WHOOP history
+
+With no WHOOP archive, scores use `generic-v1`. Nothing in it is fitted to you: it is
+published figures plus your own nights.
+
+- **Strain**: v1's zone weights and curve, your resting heart rate from your nights, and a max
+  heart rate of 208 - 0.7 x age (Tanaka). With no age it assumes 180; either way it rises to
+  the highest rate the strap sees you hold for 10 seconds. Save your age once:
+  `python calibrate.py --age 34`.
+- **Sleep**: need starts at 8 h. After 14 nights it is your own median sleep, kept between 7
+  and 9 h, plus WHOOP's strain term and part of last night's shortfall. Performance is hours
+  slept against need.
+- **Recovery**: needs 3 of your own nights first. HRV carries most of the score, then sleep,
+  then resting heart rate. These weights are a default, not a fit.
+
+Expect these to be less accurate than v1's numbers above, and nobody can check them against
+WHOOP's scores for you.
+
+### If you have your WHOOP history
+
+Pull it first (`python whoop_api.py login` then `python whoop_api.py sync`, or load an
+export with `import_data.py`), then:
+
+```bash
+python calibrate.py              # fit your model, print the errors, store it, use it if it's better
+python calibrate.py --dry-run    # fit and print only
+python calibrate.py --list       # models on this install (* = in use)
+python calibrate.py --use generic-v1   # go back, or pick any listed model
+```
+It fits the same things as v1 (in plain Python, no numpy) on the first 70% of your days and
+tests on the last 30%, next to `generic-v1` on the same days. Each part (strain, max heart rate,
+sleep, recovery) is taken from the fit only if it does at least as well as generic-v1; the
+model is used only if at least one part does better. It gets a new id (`fit-YYYY-MM-DD`) and
+never replaces an older fit. You need about 30 workouts with zone times, 30 nights and 30
+recoveries; parts with less data stay generic.
+
+Energy (kcal) per day comes from `energy.py` and needs your body data, kept only in your local
+database (it is not pushed to the cloud). Until all four are set, energy is held back:
+
+```bash
+python energy.py set sex male        # or female
+python energy.py set weight_kg 70
+python energy.py set height_cm 175
+python energy.py set age 30          # stored as birth year
+python energy.py show
+```
+It is a rough estimate: on held-out WHOOP days it was off by about 16%, on workouts by 18%.
+
+## Silent alarm and buzz (`alarm.py`)
+
+The strap can vibrate on command and has its own alarm clock. Once the alarm is set on the
+strap, the strap rings by itself at that time, even if the Mac is off or out of range.
+
+```bash
+python whoop.py buzz              # one short buzz (pattern 2, the WHOOP app's alarm buzz)
+python whoop.py alarm 07:00       # every day; 'python whoop.py alarm 07:00 once' for one morning
+python whoop.py alarm show        # the time, and whether it is on the strap yet
+python whoop.py alarm off
+```
+The Today page of the local dashboard has the same controls (`/api/alarm`, `/api/buzz`).
+They are hidden in the phone (Cloudflare) copy, which cannot reach the strap.
+
+How it works: the alarm time is stored in `sync_state` (`alarm`). Only one program can hold the
+Bluetooth link, so the CLI and the dashboard add a row to `strap_cmd`, and the daemon runs it
+within about a second. The daemon keeps the strap's alarm equal to the next time you asked
+for: the strap alarm is one-shot, so after it rings the daemon sets tomorrow's time the next
+time it is connected. It reads the alarm back every 30 minutes and sets it again if the strap
+lost it. If the strap does not confirm an alarm, the daemon rings the strap itself at that
+time (only if it is connected then). Without the daemon, the CLI connects directly.
+
+The alarm buzz lasts about 24 seconds. A light-sleep "smart" window is not built yet.
+
+**Protocol.** Opcodes and payloads come from community reverse-engineering, then were tested on
+a real WHOOP 4.0 (2026-11-19). Sources: [NOOP `docs/PROTOCOL.md`](https://github.com/muftiarfan/noop/blob/main/docs/PROTOCOL.md)
+and `Enums.kt` (opcode numbers, RUN_HAPTICS payload), [OpenStrap `lib/src/commands.dart`](https://github.com/OpenStrap/protocol/blob/main/lib/src/commands.dart)
+(the revision-1 SET_ALARM form that fires on firmware 41.17.4, the GET reply layout, event ids),
+[whoop-rs `haptic.rs`](https://github.com/tanarchytan/whoop-rs/blob/main/crates/whoop-protocol/src/haptic.rs).
+
+| Command (opcode) | Payload | On the real strap |
+|---|---|---|
+| RUN_HAPTICS_PATTERN (79) | `[pattern, loops, 0, 0, 0]`; pattern 2 | **Verified.** Buzzed about 2 s; reply status 2 (not 1), then events 60 HAPTICS_FIRED and 100 HAPTICS_TERMINATED |
+| SET_ALARM_TIME (66) | `[0x01][u32 unix s][u16 1/32768 s][u16 mode 0]` | **Verified.** Status 1; the reply echoes the time |
+| GET_ALARM_TIME (67) | `[0x01]`; reply `[0x01][armed][u32 unix s][u16]` | **Verified.** Read back the exact time; not armed after DISABLE and after it rang |
+| DISABLE_ALARM (69) | `[0x01]` | **Verified.** Status 1; read-back shows nothing armed |
+| Strap alarm firing | - | **Verified twice**, without any command at that time: HAPTICS_TERMINATED arrived 23-24 s after the set time (09:34:13 and 09:44:00), then nothing was armed (one-shot). Events 57/60 are sent with stored history, not live. |
+| RUN_ALARM (68) | `[0x01]` | **Verified.** Status 1; rang about 24 s (the daemon's fallback) |
+| STOP_HAPTICS (122) | `[0x00]` | **Does not work** on this firmware: status 3, the buzz kept going. Not used by the CLI or the dashboard |
+| GET_ALL_HAPTICS_PATTERN (80), other patterns | - | Not tried |
+
+Not verified: that the alarm rings with the Mac fully off (it rang while the Mac was connected
+but sent nothing at that time, so the strap ran it on its own); behaviour on other firmware.
+
 ## Your dashboard on your phone (Cloudflare Worker, optional)
 
 The same app, hosted on your own Cloudflare account and reading the D1 database
@@ -225,7 +354,9 @@ launchctl load ~/Library/LaunchAgents/com.whoop.dashboard.plist
 ## Files
 | File | Role |
 |---|---|
-| `whoop.py` | WHOOP 4.0 BLE protocol (frames, CRCs, parsers) + CLI (`info`/`live`/`drain`) |
+| `whoop.py` | WHOOP 4.0 BLE protocol (frames, CRCs, parsers, haptics, alarm) + CLI (`info`/`live`/`drain`/`buzz`/`alarm`) |
+| `alarm.py` | silent alarm: stored time, keeps the strap's own alarm in step, buzz requests through the daemon (`strap_cmd`) |
+| `test_alarm.py` | tests for the alarm logic and the haptics/alarm frames |
 | `db.py` | SQLite schema + helpers |
 | `whoop_api.py` | OAuth2 + v2 API sync |
 | `daemon.py` | always-on strap host: connect when nearby, drain, live stream, reconnect; housekeeping on timers |
@@ -235,6 +366,12 @@ launchctl load ~/Library/LaunchAgents/com.whoop.dashboard.plist
 | `test_daemon.py` | tests for the daemon and decoder with a fake strap |
 | `telegram_report.py` | Telegram bot: morning message with a recommendation, nudges (battery, strap missing), commands, how-you-feel feedback |
 | `learn.py` | what it has learned about you: recovery model fitted on your WHOOP archive, your usual, hours and range, zones tuned by your feedback |
+| `scores.py` | Strain, Sleep and Recovery estimated from the strap, versioned, calibrated and checked on your WHOOP archive |
+| `calibrate.py` | Fits your own scores model on your WHOOP archive (plain Python), tests it against `generic-v1`, uses it if it's better |
+| `energy.py` | energy per day (kcal) from strap heart rate and your body data (`set` / `show` body data) |
+| `stress.py` | stress monitor: 0-3 every 5 minutes while you're still and awake, heart rate and HRV against your own calm (method and sources in the file) |
+| `alerts.py` | health alerts: resting HR up, HRV down, short sleep, breathing rate up, very low recovery, each 3 clean nights in a row; pattern-matching, not a diagnosis |
+| `test_stress.py` / `test_alerts.py` | tests for both on synthetic days and nights |
 | `metrics.py` | the numbers computed from strap heart rate (resting HR, HRV, time with HR up); shared by dashboard, Telegram and learn |
 | `config.py` | paths and `.env` reading, shared by every script |
 | `test_archive.py` | tests for the archive with a fake bucket |

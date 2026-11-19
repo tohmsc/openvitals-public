@@ -268,6 +268,7 @@ svg { flex: none; }
 .span-4 { grid-column: span 4; } .span-5 { grid-column: span 5; } .span-6 { grid-column: span 6; }
 .span-7 { grid-column: span 7; } .span-8 { grid-column: span 8; } .span-12 { grid-column: span 12; }
 .stack { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+.stack > .card:last-child { flex: 1; }
 
 /* ───────── Card ───────── */
 .card {
@@ -281,7 +282,7 @@ svg { flex: none; }
 .card__hint { color: var(--text-3); font-size: 0.8125rem; display: inline-flex; align-items: center; gap: 6px; }
 .card__stat { color: var(--text-2); font-size: 0.8125rem; margin-top: 2px; }
 .card__stat strong { color: var(--text); font-weight: 500; }
-.card__foot { padding: 4px 12px 12px; }
+.card__foot { padding: 4px 8px 12px; } /* 8 + the button's 12 = the card's 20px edge */
 .card__foot:has(> [hidden]:only-child) { display: none; }
 
 .chart { position: relative; width: 100%; }
@@ -292,9 +293,13 @@ svg { flex: none; }
 .chart--sm { height: 200px; }
 .chart--md { height: 240px; }
 .chart canvas, .monitor__trace canvas { display: block; }
+.chart canvas[hidden] { display: none; }
 
-.empty { display: grid; place-items: center; text-align: center; height: 100%; min-height: 120px; color: var(--text-3); font-size: 0.8125rem; padding: 16px; }
-.empty strong { display: block; color: var(--text-2); font-weight: 500; margin-bottom: 2px; }
+/* Empty state: centered in the space the content would have used, clear of the card's edges. */
+.empty { display: grid; place-items: center; text-align: center; flex: 1; height: 100%; min-height: 120px; color: var(--text-3); font-size: 0.8125rem; line-height: 1.5; padding: 24px; }
+.empty > div { max-width: 44ch; text-wrap: balance; }
+.empty strong { display: block; color: var(--text-2); font-weight: 500; margin-bottom: 4px; }
+.chart > .empty { position: absolute; inset: 0; }
 
 /* ───────── Alerts and notices ───────── */
 .alert { margin-top: 16px; padding: 12px 16px; border-radius: var(--radius); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; border: 1px solid color-mix(in srgb, var(--low) 40%, var(--border)); }
@@ -439,7 +444,7 @@ body[data-period="archive"] .section .title::after { content: "Archive"; margin-
 .glance__label { font-size: 0.8125rem; color: var(--text-3); }
 .glance__val { font-size: 1.5rem; line-height: 1.15; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 .glance__val small { font-size: 0.8125rem; color: var(--text-3); margin-left: 4px; letter-spacing: var(--track); }
-.glance__sub { font-size: 0.8125rem; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.glance__sub { font-size: 0.8125rem; color: var(--text-2); text-wrap: balance; }
 
 /* ───────── Sleep ───────── */
 .lastnight { display: flex; flex-direction: column; gap: 20px; flex: 1; }
@@ -485,13 +490,26 @@ body[data-period="archive"] .section .title::after { content: "Archive"; margin-
 .strainbar__v { font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; }
 
 /* ───────── Battery ───────── */
-.battery { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.battery { display: flex; flex-direction: column; gap: 14px; }
+.battery__row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.battery__label { color: var(--text-2); font-size: 0.875rem; min-width: 7.5rem; }
+.battery__num--none { color: var(--text-3); }
 .battery__icon { width: 36px; height: 18px; border-radius: 5px; box-shadow: inset 0 0 0 1px var(--text-3); padding: 2px; position: relative; }
 .battery__icon::after { content: ""; position: absolute; right: -3px; top: 6px; width: 2px; height: 6px; border-radius: 0 1px 1px 0; background: var(--text-3); }
 .battery__fill { display: block; height: 100%; border-radius: 3px; background: var(--zc, var(--m-battery)); }
 .battery__num { font-size: 1.75rem; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 .battery__num small { color: var(--text-3); font-size: 0.875rem; margin-left: 2px; }
-.battery .status-chip { margin-left: auto; }
+.battery__row .status-chip { margin-left: auto; }
+
+/* ───────── Heart rate coverage (Device) ───────── */
+.coverage { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.coverage__row { display: grid; grid-template-columns: 5.5rem 1fr 3rem; align-items: center; gap: 4px 10px; font-size: 0.8125rem; }
+.coverage__day { color: var(--text-2); }
+.coverage__pct { text-align: right; font-variant-numeric: tabular-nums; }
+.coverage__bar { display: flex; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.coverage__bar i { display: block; height: 100%; background: var(--m-hr); }
+.coverage__bar i + i { background: var(--m-hr); opacity: 0.35; }
+.coverage__why { grid-column: 2 / -1; color: var(--text-3); font-size: 0.75rem; line-height: 1.4; }
 
 /* ───────── Firmware log ───────── */
 .card--console { padding: 0; overflow: hidden; }
@@ -671,7 +689,10 @@ body[data-view="heart"] { overflow: hidden; }
 .sleep__key span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; vertical-align: 0; }
 .sleep__key [data-s="s"]::before { background: var(--m-hrv); }
 .sleep__key [data-s="a"]::before { background: var(--g8); }
-@media (max-width: 1320px) {
+@media (max-width: 1180px) {
+  .sleep--side { flex: 0 1 320px; padding: 0 64px 0 0; border-bottom: 0; border-right: 1px solid var(--border); }
+}
+@media (max-width: 760px) {
   .sleep--stage { display: block; position: relative; padding: 0 0 4px; }
   .sleep--side { display: none !important; }
 }
@@ -858,3 +879,27 @@ body[data-view="heart"] { overflow: hidden; }
 .learned__feel .btn { flex: 1; }
 .learned__feel .btn[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
 .learned__list { margin-top: 12px; display: grid; gap: 4px; font-size: 0.75rem; line-height: 1.45; color: var(--text-2); list-style: none; padding: 0; }
+
+/* ───────── Stress monitor and health alerts (stress.js) ───────── */
+.stress { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 12px; }
+.stress__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--text-3)); align-self: center; flex: none; }
+.stress__level { font-size: 1.25rem; font-weight: 500; letter-spacing: -0.012em; color: var(--text); }
+.stress__num { font-variant-numeric: tabular-nums; color: var(--text-2); }
+.stress__num small { color: var(--text-3); font-size: 0.75rem; }
+.stress__why { flex-basis: 100%; font-size: 0.8125rem; color: var(--text-3); }
+#alerts-card[hidden] { display: none; }
+.hals { display: grid; gap: 12px; }
+.hal { padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--fair) 45%, var(--border)); border-radius: 8px; }
+.hal__title { font-weight: 500; color: var(--text); }
+.hal__text { color: var(--text-2); margin-top: 2px; }
+.hal__why { font-size: 0.75rem; color: var(--text-3); margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+/* ───────── Silent alarm (local dashboard only) ───────── */
+.alarm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.alarm__field { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: var(--text-2); }
+.alarm__field input {
+  height: 32px; padding: 0 8px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong);
+  background: var(--surface); color: var(--text); font: inherit; font-variant-numeric: tabular-nums;
+}
+.alarm__check { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8125rem; color: var(--text-2); }
+.alarm input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }

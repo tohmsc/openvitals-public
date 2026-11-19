@@ -314,12 +314,18 @@ def call_for(night, u, th=None, m=None):
     return zone(est[0], th["green_min"], th["red_max"])
 
 
+def trend_line(u):
+    """Resting HR (bpm) that counts as clearly above your usual: 4 bpm or 1.5x your normal
+    night-to-night variation over it, whichever is more."""
+    return u["rhr"] + max(4.0, 1.5 * u["rhr_spread"])
+
+
 def trend(c, today, u):
     """Mornings in a row (ending today) with resting HR clearly above your usual, if 3 or more.
     A single high night is noise; several in a row is the pattern worth acting on."""
     if not u.get("rhr"):
         return 0
-    line = u["rhr"] + max(4.0, 1.5 * u["rhr_spread"])
+    line = trend_line(u)
     run, expect = 0, time.mktime(time.strptime(today, "%Y-%m-%d"))
     for r in c.execute("SELECT date, rhr FROM daily_night WHERE date <= ? AND rhr IS NOT NULL ORDER BY date DESC LIMIT 14", (today,)):
         if r["date"] != _date(expect + 43200) or r["rhr"] < line:
@@ -336,10 +342,11 @@ def remember(c, today, night, yesterday, u, th, m=None):
         return None
     est = recovery(night, u, m)
     call = call_for(night, u, th, m)
-    c.execute("INSERT INTO daily_night(date,rhr,hrv,load_s,peak,recorded_s,score,call) VALUES(?,?,?,?,?,?,?,?) "
-              "ON CONFLICT(date) DO UPDATE SET rhr=excluded.rhr, hrv=excluded.hrv, load_s=excluded.load_s, "
-              "peak=excluded.peak, recorded_s=excluded.recorded_s, score=excluded.score, call=excluded.call",
-              (today, night["resting"], night["rmssd"],
+    c.execute("INSERT INTO daily_night(date,rhr,hrv,n_rr,load_s,peak,recorded_s,score,call) VALUES(?,?,?,?,?,?,?,?,?) "
+              "ON CONFLICT(date) DO UPDATE SET rhr=excluded.rhr, hrv=excluded.hrv, n_rr=excluded.n_rr, "
+              "load_s=excluded.load_s, peak=excluded.peak, recorded_s=excluded.recorded_s, score=excluded.score, "
+              "call=excluded.call",
+              (today, night["resting"], night["rmssd"], night.get("n_rr"),
                yesterday["high_s"] if yesterday else None, yesterday["max"] if yesterday else None,
                yesterday["recorded_s"] if yesterday else None, est[0] if est else None, call))
     c.commit()

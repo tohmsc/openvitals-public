@@ -17,12 +17,14 @@ The cloud dashboard (worker/) reads this database. Run --fast every few minutes
 Set WHOOP_HOME to read .env from another folder.
 """
 import os, sqlite3, requests, sys, time, json
-import config, db, sleep
+import alerts, config, db, metrics, scores, sleep, stress
 
 HERE = config.HERE
 HOME = os.environ.get("WHOOP_HOME") or HERE
 CF = "https://api.cloudflare.com/client/v4"
 
+EST_TABLE = ("CREATE TABLE IF NOT EXISTS estimates (date TEXT, kind TEXT, version TEXT, value REAL, ok INTEGER, "
+             "why TEXT, row TEXT, inputs TEXT, computed_at REAL, PRIMARY KEY (date, kind, version))")
 SCHEMA = [
  "CREATE TABLE IF NOT EXISTS api_recovery (cycle_id INTEGER PRIMARY KEY, sleep_id TEXT, created_at TEXT, score_state TEXT, recovery_score REAL, resting_hr REAL, hrv_rmssd_ms REAL, spo2 REAL, skin_temp_c REAL)",
  "CREATE TABLE IF NOT EXISTS api_sleep (id TEXT PRIMARY KEY, start TEXT, end TEXT, nap INTEGER, resp_rate REAL, sleep_perf REAL, sleep_consistency REAL, sleep_efficiency REAL, total_in_bed_ms INTEGER, total_awake_ms INTEGER, total_light_ms INTEGER, total_sws_ms INTEGER, total_rem_ms INTEGER, disturbances INTEGER)",
@@ -34,6 +36,8 @@ SCHEMA = [
  "CREATE TABLE IF NOT EXISTS device_logs (rtc INTEGER, subsystem TEXT, message TEXT, PRIMARY KEY (rtc, subsystem, message))",
  "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
  sleep.SCHEMA,
+ EST_TABLE,
+ stress.SCHEMA,
  "CREATE INDEX IF NOT EXISTS idx_ble_hr_ts ON ble_hr(ts)",
 ]
 MIGRATIONS = ["ALTER TABLE api_workout ADD COLUMN zone_raw TEXT"]  # safe to fail if present
@@ -45,7 +49,7 @@ ARCHIVE = {
  "api_workout": "id,start,end,sport_name,score_state,strain,avg_hr,max_hr,kilojoule,distance_m,zone_raw",
 }
 PROFILE_KEYS = ("first_name",)  # only what the dashboard shows
-META_KEYS = ("last_ble_sync", "api_since", "live_hr_now")
+META_KEYS = ("last_ble_sync", "api_since", "live_hr_now", "battery_now", "pack_battery_now", "stress_baseline")
 
 
 def env():
@@ -109,6 +113,25 @@ def has(c, t):
     return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone() is not None
 
 
+def push_late_hr(c, d1, batch=5000):
+    """Heart rate decode.py filled in behind the watermark (stored history read late): push
+    those rows, then forget them. Returns how many went up."""
+    if not has(c, "cloud_hr_pending"):
+        return 0
+    sent = 0
+    while True:
+        late = c.execute("SELECT p.ts, h.hr, h.rr_ms FROM cloud_hr_pending p LEFT JOIN ble_hr h ON h.ts = p.ts "
+                         "ORDER BY p.ts LIMIT ?", (batch,)).fetchall()
+        if not late:
+            return sent
+        rows = [r for r in late if r["hr"] is not None]
+        if rows:
+            d1.upsert("ble_hr", "ts,hr,rr_ms", rows, chunk=200)
+        c.executemany("DELETE FROM cloud_hr_pending WHERE ts = ?", [(r["ts"],) for r in late])
+        c.commit()
+        sent += len(rows)
+
+
 def main(fast=False):
     e = env()
     token = e.get("CF_API_TOKEN")
@@ -142,6 +165,7 @@ def main(fast=False):
     pushed["ble_hr"] = d1.upsert("ble_hr", "ts,hr,rr_ms", hr, chunk=200)
     if hr:
         db.set_state(c, "cloud_hr_ts", str(hr[-1]["ts"]))
+    pushed["ble_hr"] += push_late_hr(c, d1)
 
     if has(c, "device_soc"):
         soc = c.execute("SELECT rtc,soc_pct,subsystem FROM device_soc ORDER BY rtc DESC LIMIT 200").fetchall()
@@ -156,10 +180,38 @@ def main(fast=False):
         nights = c.execute(f"SELECT {sleep.COLS} FROM sleep_night ORDER BY date DESC LIMIT 30").fetchall()
         pushed["sleep_night"] = d1.upsert("sleep_night", sleep.COLS, nights)
 
+    # strap score estimates (scores.py): every version, small, changes through the day
+    if has(c, "estimates"):
+        if not db.get_state(c, "cloud_est_schema"):        # a fast run can come before any full one
+            d1.q(EST_TABLE)
+            db.set_state(c, "cloud_est_schema", "1")
+        est = c.execute("SELECT date,kind,version,value,ok,why,row,inputs,computed_at FROM estimates "
+                        "WHERE computed_at > ?", (float(db.get_state(c, "cloud_est_ts", "0") or 0),)).fetchall()
+        pushed["estimates"] = d1.upsert("estimates", "date,kind,version,value,ok,why,row,inputs,computed_at", est)
+        if est:
+            db.set_state(c, "cloud_est_ts", str(max(r["computed_at"] for r in est)))
+    # stress monitor (stress.py): windows that changed since the last push (today and yesterday)
+    if has(c, "stress"):
+        if not db.get_state(c, "cloud_stress_schema"):
+            d1.q(stress.SCHEMA)
+            db.set_state(c, "cloud_stress_schema", "1")
+        st = c.execute(f"SELECT {stress.COLS} FROM stress WHERE computed_at > ? AND date >= ?",
+                       (float(db.get_state(c, "cloud_stress_ts", "0") or 0),
+                        time.strftime("%Y-%m-%d", time.localtime(time.time() - 2 * 86400)))).fetchall()
+        pushed["stress"] = d1.upsert("stress", stress.COLS, st)
+        if st:
+            db.set_state(c, "cloud_stress_ts", str(max(r["computed_at"] for r in st)))
     meta = [{"key": k, "value": db.get_state(c, k)} for k in META_KEYS if db.get_state(c, k) is not None]
+    # the stress baseline in use and the health alerts that are on (alerts.py), for the cloud app
+    try:
+        meta.append({"key": "health_alerts", "value": json.dumps(alerts.active(c))})
+    except Exception as ex:
+        print("alerts error:", ex)
+    meta.append({"key": "scores_version", "value": scores.current(c)})
     meta.append({"key": "last_cloud_sync", "value": str(time.time())})
     counts = {t: c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("api_recovery", "api_sleep", "api_cycle", "api_workout", "ble_hr", "ble_raw")}
     meta.append({"key": "local_counts", "value": json.dumps(counts)})
+    meta.append({"key": "coverage", "value": json.dumps(metrics.coverage_days(c, 7))})   # Device page
     d1.upsert("meta", "key,value", meta)
     c.commit()
     print("cloud sync complete:", ", ".join(f"{k} {v}" for k, v in pushed.items()), f"-> D1 {dbid[:8]}…")
