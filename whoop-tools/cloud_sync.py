@@ -67,8 +67,18 @@ class D1:
         self.s.headers["Authorization"] = f"Bearer {token}"
         self.url = f"{CF}/accounts/{acct}/d1/database/{dbid}/query"
 
-    def q(self, sql, ok_fail=False):
-        r = self.s.post(self.url, json={"sql": sql}, timeout=60)
+    def q(self, sql, ok_fail=False, tries=3):
+        # a dropped or slow link (e.g. right after the Mac wakes) gets two more tries;
+        # every statement here is an upsert, so sending one twice is harmless
+        for i in range(tries):
+            try:
+                r = self.s.post(self.url, json={"sql": sql}, timeout=60)
+                if r.status_code < 500 or i == tries - 1:
+                    break
+            except (requests.ConnectionError, requests.Timeout):
+                if i == tries - 1:
+                    raise
+            time.sleep(3 * (i + 1))
         j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
         if r.status_code >= 400 or not j.get("success"):
             if ok_fail:

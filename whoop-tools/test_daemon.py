@@ -189,6 +189,114 @@ class DaemonTest(unittest.TestCase):
         asyncio.run(run_for(d, 0.5))
         self.assertGreaterEqual(len(FakeStrap.made), 3)     # noticed within the stall window, kept retrying
 
+    def test_recovers_from_a_scan_that_never_returns(self):
+        """After the Mac sleeps, a CoreBluetooth scan can hang forever; the daemon must retry."""
+        calls = []
+
+        async def find():
+            calls.append(1)
+            if len(calls) == 1:
+                await asyncio.Event().wait()            # never finishes
+            return "FAKE-ADDR"
+        d = make()
+        d.addr, d.find, d.find_timeout = (lambda: None), find, 0.05
+        asyncio.run(run_for(d, 0.3))
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertTrue(FakeStrap.made)                 # connected once the scan was retried
+        self.assertGreater(FakeStrap.made[-1].sent, 0)
+
+    def test_recovers_from_a_connect_that_never_returns(self):
+        class Stuck(FakeStrap):
+            closed = 0
+
+            async def __aenter__(self):
+                if len(FakeStrap.made) == 1:
+                    await asyncio.Event().wait()        # first connect hangs
+                return self
+
+            async def __aexit__(self, *a):
+                Stuck.closed += 1
+                await super().__aexit__(*a)
+        d = make()
+        d.strap, d.link_timeout = Stuck, 0.05
+        asyncio.run(run_for(d, 0.3))
+        self.assertGreaterEqual(len(FakeStrap.made), 2)
+        self.assertGreater(FakeStrap.made[1].sent, 0)   # second attempt streams
+        self.assertGreaterEqual(Stuck.closed, 1)        # the hung link was told to disconnect
+
+    def test_wake_drops_the_old_link_and_reconnects(self):
+        """A jump between wall and monotonic time = the Mac slept: reconnect at once."""
+        d = make()
+        d.restart = lambda why: None
+
+        async def during(d):
+            await asyncio.sleep(0.1)
+            d._skew -= 3600                                 # as if the Mac had slept an hour
+        asyncio.run(run_for(d, 0.2, during))
+        self.assertGreaterEqual(len(FakeStrap.made), 2)
+        self.assertGreater(FakeStrap.made[-1].sent, 0)      # the fresh link streams
+
+    def test_restarts_if_the_strap_stays_unreachable_after_a_wake(self):
+        """The 2026-11-19 failure: after sleep the scan never finds the strap (it is there)."""
+        why = []
+        d = make()
+        d.addr, d.find = (lambda: None), (lambda: asyncio.sleep(0.01))   # scan finds nothing
+        d.wake_grace = 0.05
+
+        def restart(reason):
+            why.append(reason)
+            d.stop.set()                                    # a real restart replaces the process
+        d.restart = restart
+
+        async def during(d):
+            d._skew -= 3600
+        asyncio.run(run_for(d, 0.3, during))
+        self.assertEqual(len(why), 1)
+
+    def test_restarts_if_a_wake_during_a_link_is_followed_by_a_blind_scan(self):
+        """Found in the live test: the wake was seen inside the session, and the restart
+        deadline after it was the 30-minute one, not wake_grace."""
+        why = []
+        d = make()
+        d.wake_grace = 0.05
+
+        def restart(reason):
+            why.append(reason)
+            d.stop.set()
+        d.restart = restart
+
+        async def during(d):
+            await asyncio.sleep(0.1)                        # linked and streaming
+            d.addr, d.find = (lambda: None), (lambda: asyncio.sleep(0.01))   # scanner now blind
+            d._skew -= 3600                                 # ... after a sleep
+        asyncio.run(run_for(d, 0.4, during))
+        self.assertEqual(len(why), 1)
+
+    def test_no_restart_while_linked_or_out_of_range_briefly(self):
+        why = []
+        d = make()
+        d.restart = why.append
+        asyncio.run(run_for(d, 0.2))                        # linked the whole time
+        d = make()
+        d.addr, d.find = (lambda: None), (lambda: asyncio.sleep(0.01))
+        d.restart = why.append
+        asyncio.run(run_for(d, 0.2))                        # away, but not for idle_restart
+        self.assertEqual(why, [])
+
+    def test_watchdog_restarts_a_stuck_main_loop(self):
+        why = []
+        d = make()
+        d.watchdog = 0.2
+        d.restart = why.append
+
+        async def find():                                   # blocks the whole event loop
+            import time as _t
+            _t.sleep(0.6)
+            return None
+        d.addr, d.find = (lambda: None), find
+        asyncio.run(run_for(d, 0.05))
+        self.assertTrue(why and "stuck" in why[0])
+
     def test_keeps_looking_while_out_of_range(self):
         calls = []
 
@@ -330,6 +438,28 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(float(db.get_state(c, "cloud_hr_ts")), T - 1)        # cloud push will pick them up
         decode.run(full=True, quiet=True)                    # rebuilding adds nothing twice
         self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 6)
+
+    def test_a_repeated_log_line_does_not_stop_the_history(self):
+        """Night of 18-19 Nov: the strap re-sent a log line after a reconnect, the insert hit the
+        live DB's primary key, and every decode run after that failed before the heart rate."""
+        c = db.connect()
+        c.execute("DROP TABLE IF EXISTS device_logs")
+        c.execute("CREATE TABLE device_logs (rtc INTEGER, subsystem TEXT, message TEXT, "
+                  "PRIMARY KEY (rtc, subsystem, message))")      # as the live DB has it
+        for t in ("ble_raw", "ble_hr", "sync_state"):
+            c.execute(f"DELETE FROM {t}")
+        c.commit()
+        T = 1_795_050_000
+        line = b"31, 2000: BLE: connected. 31, 2001: BLE: ok. "
+        self.load([console(line)], c)
+        decode.run(quiet=True)
+        self.load([console(line), self.history(T, 47, rr=(1300,))], c)   # repeat, then the night
+        decode.run(quiet=True)
+        self.assertEqual([r["hr"] for r in c.execute("SELECT hr FROM ble_hr")], [47])
+        self.assertEqual(int(db.get_state(c, "decode_rowid")),
+                         c.execute("SELECT MAX(rowid) m FROM ble_raw").fetchone()["m"])
+        c.execute("DROP TABLE device_logs"); c.commit()
+        c.executescript(decode.EXTRA)
 
     def test_other_record_versions_are_not_read_as_heart_rate(self):
         # version 25 is a block of raw sensor samples: byte 14 there is not a heart rate

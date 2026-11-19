@@ -239,6 +239,7 @@ launchctl load ~/Library/LaunchAgents/com.whoop.dashboard.plist
 | `config.py` | paths and `.env` reading, shared by every script |
 | `test_archive.py` | tests for the archive with a fake bucket |
 | `test_telegram.py` | tests for the daily summary with a fake Telegram |
+| `test_connections.py` | tests for the network links: D1 push retries, Telegram errors without the bot token |
 | `backup.py` | encrypted local snapshots (+ `decrypt`) |
 | `cloud_sync.py` | push to Cloudflare D1 over REST |
 | `dashboard.py` + `static/` | localhost dashboard: Flask JSON API + static page (vendored Chart.js, offline) |
