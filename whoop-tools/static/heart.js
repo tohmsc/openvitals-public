@@ -247,6 +247,48 @@
     const total = Object.values(DATA.counts || {}).reduce((a, b) => a + b, 0);
     $("#hv-count").textContent = n0.format(total);
     canvas.setAttribute("aria-label", `Animated heart${hrNow ? ` beating at ${hrNow} beats per minute` : ""}.`);
+    renderSleep();
+  }
+
+  /* ───────── Last night (sleep.py: movement + heart rate from the strap) ───────── */
+  const hm = (s) => { const t = Math.round(s / 60), h = Math.floor(t / 60), m = t % 60; return (h ? `${h} h ${String(m).padStart(2, "0")} min` : `${m} min`).replace(/ /g, "\u00a0"); };
+  function renderSleep() {
+    const boxes = document.querySelectorAll("[data-sleep]");
+    const today = isToday();
+    boxes.forEach((b) => { b.hidden = !today; });
+    if (!today) return;
+    const n = (DATA?.nights || []).find((x) => x.date === ymd(Date.now()));
+    let html;
+    if (!n) {
+      html = `<p class="hv-card__label">Last night</p><p class="sleep__empty">No sleep recorded. Wear the strap to bed and your night shows up here in the morning.</p>`;
+    } else {
+      const done = n.status === "done";
+      const t = Math.round(n.asleep_s / 60);
+      let vs = "The rest of the night is still coming in from the strap.";
+      if (done && n.usual_s) {
+        const d = n.asleep_s - n.usual_s;
+        vs = Math.abs(d) < 1200 ? `About your usual ${hm(n.usual_s)}.` : `${hm(Math.abs(d))} ${d > 0 ? "more" : "less"} than your usual ${hm(n.usual_s)}.`;
+      } else if (done) vs = "";
+      let segs = [];
+      try { segs = JSON.parse(n.segments || "[]"); } catch { /* ignore */ }
+      const s0 = segs[0]?.[0], s1 = segs.at(-1)?.[1];
+      const bar = segs.length && s1 > s0 ? segs.filter((g) => g[2] !== "-").map((g) =>
+        `<span data-s="${g[2]}" style="left:${((g[0] - s0) / (s1 - s0) * 100).toFixed(2)}%;width:${((g[1] - g[0]) / (s1 - s0) * 100).toFixed(2)}%"></span>`).join("") : "";
+      const at = (x) => `${((x - s0) / (s1 - s0) * 100).toFixed(2)}%`;
+      const on = dTime.format(n.onset * 1000), off = dTime.format(n.wake * 1000);
+      const woke = !n.wakeups ? "No wake-ups" : n.wakeups === 1 ? "Woke up once" : `Woke up ${n.wakeups} times`;
+      const facts = [done ? woke : null, n.rhr ? `Resting ${fmt(n.rhr)} bpm` : null, n.hrv ? `HRV ${fmt(n.hrv)} ms` : null].filter(Boolean).join(" · ");
+      html = `<p class="hv-card__label">${done ? "Last night" : "Last night so far"}</p>
+<p class="hv-card__num">${Math.floor(t / 60)}<small>h</small> ${t % 60}<small>m</small></p>
+<p class="sleep__vs">${esc(vs) || "&nbsp;"}</p>
+<div class="sleep__chart" role="img" aria-label="Asleep from ${on} to ${done ? off : "now"}, ${hm(n.awake_s)} awake in between">
+  <div class="sleep__strip">${bar}</div>
+  <div class="sleep__marks"><span style="left:${at(n.onset)}">${esc(on)}</span><span style="left:${at(n.wake)}">${done ? esc(off) : ""}</span></div>
+</div>
+<p class="sleep__facts">${esc(facts)}</p>
+<p class="sleep__key" aria-hidden="true"><span data-s="s">Asleep</span><span data-s="a">Awake</span></p>`;
+    }
+    boxes.forEach((b) => { if (b.innerHTML !== html) b.innerHTML = html; });
   }
 
   /* ───────── Timeline ───────── */

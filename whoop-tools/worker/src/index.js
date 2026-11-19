@@ -323,6 +323,11 @@ async function summary(env, url) {
     DB.prepare("SELECT MIN(created_at) a, MAX(created_at) b FROM api_recovery"),
   ]);
   const m = Object.fromEntries(meta.results.map((r) => [r.key, r.value]));
+  // how you slept (sleep.py on the Mac); the table appears with the first push that has a night
+  let nights = [];
+  try {
+    nights = (await DB.prepare("SELECT date,onset,wake,asleep_s,awake_s,wakeups,rhr,hrv,usual_s,status,headline,detail,segments FROM sleep_night ORDER BY date DESC LIMIT 30").all()).results;
+  } catch { /* not pushed yet */ }
   let counts = {};
   try { counts = JSON.parse(m.local_counts || "{}"); } catch { /* ignore */ }
   return {
@@ -341,6 +346,7 @@ async function summary(env, url) {
     logs: logs.results,
     today_hr: today.results,
     archive: { start: arch.results[0]?.a ?? null, end: arch.results[0]?.b ?? null },
+    nights,
     sync: { ble: m.last_ble_sync ? Number(m.last_ble_sync) : null, api: m.api_since ?? null, cloud: m.last_cloud_sync ? Number(m.last_cloud_sync) : null },
     counts,
   };

@@ -17,7 +17,7 @@ The cloud dashboard (worker/) reads this database. Run --fast every few minutes
 Set WHOOP_HOME to read .env from another folder.
 """
 import os, sqlite3, requests, sys, time, json
-import config, db
+import config, db, sleep
 
 HERE = config.HERE
 HOME = os.environ.get("WHOOP_HOME") or HERE
@@ -33,6 +33,7 @@ SCHEMA = [
  "CREATE TABLE IF NOT EXISTS device_soc (rtc INTEGER PRIMARY KEY, soc_pct REAL, subsystem TEXT)",
  "CREATE TABLE IF NOT EXISTS device_logs (rtc INTEGER, subsystem TEXT, message TEXT, PRIMARY KEY (rtc, subsystem, message))",
  "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
+ sleep.SCHEMA,
  "CREATE INDEX IF NOT EXISTS idx_ble_hr_ts ON ble_hr(ts)",
 ]
 MIGRATIONS = ["ALTER TABLE api_workout ADD COLUMN zone_raw TEXT"]  # safe to fail if present
@@ -148,6 +149,12 @@ def main(fast=False):
     if has(c, "device_logs"):
         logs = c.execute("SELECT rtc,subsystem,replace(message, char(0), '') AS message FROM device_logs ORDER BY rtc DESC LIMIT 120").fetchall()
         pushed["device_logs"] = d1.upsert("device_logs", "rtc,subsystem,message", logs)
+
+    # last nights' sleep (sleep.py): small, so the last 30 go up every run
+    if has(c, "sleep_night"):
+        d1.q(sleep.SCHEMA)
+        nights = c.execute(f"SELECT {sleep.COLS} FROM sleep_night ORDER BY date DESC LIMIT 30").fetchall()
+        pushed["sleep_night"] = d1.upsert("sleep_night", sleep.COLS, nights)
 
     meta = [{"key": k, "value": db.get_state(c, k)} for k in META_KEYS if db.get_state(c, k) is not None]
     meta.append({"key": "last_cloud_sync", "value": str(time.time())})

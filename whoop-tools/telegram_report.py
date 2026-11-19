@@ -41,7 +41,7 @@ encrypted). Only these short messages are sent, never raw data.
 """
 import json, os, secrets, sys, time
 import requests
-import config, db, learn, metrics
+import config, db, learn, metrics, sleep
 from metrics import day_stats, night_stats, day_bounds, battery      # noqa: F401 (also used by tests)
 
 HERE = config.HERE
@@ -134,6 +134,14 @@ def compose(c, start, end, label, morning):
             head += " You bounced back well from yesterday."
     bullets = []
     then = usual.get("then")
+    if morning:
+        try:
+            slept = sleep.night(c, morning)
+        except Exception as ex:                       # the message goes out without it
+            print("sleep error:", ex)
+            slept = None
+        if slept:
+            bullets.append(f"{slept['headline']} {slept['detail']}")
     if night and night.get("suspect"):
         bullets.append(f"Night: the strap reported a resting HR of {night['resting']:.0f}, which isn't believable. "
                        "Check it sits snug, a finger above the wrist bone.")

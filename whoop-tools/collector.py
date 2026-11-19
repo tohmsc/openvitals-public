@@ -113,6 +113,15 @@ def run_decode(quiet=False):
         return False
     return True
 
+def run_sleep():
+    # when you fell asleep and woke up (sleep.py), from the decoded movement and heart rate
+    try:
+        import sleep; sleep.update()
+    except Exception as ex:
+        print("sleep error:", ex)
+        return False
+    return True
+
 def run_backup(keep=30):
     # local snapshot (encrypted if .backup_key present)
     try:
