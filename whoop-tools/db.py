@@ -80,6 +80,49 @@ def add_columns(c, added):
                 if "duplicate column" not in str(ex):
                     raise
 
+RR_FIX_VERSION = 1            # PRAGMA user_version from which stored beat intervals are true ms
+RR_FIX_REPUSH_DAYS = 7        # the cloud only shows the last day of beats; re-send a week of them
+
+
+def fix_rr_units(c):
+    """Once: rescale beat intervals stored before the strap's RR was read as milliseconds.
+
+    Until Nov 2026 the strap's RR values were treated as 1/1024 s (the standard Heart Rate
+    service's unit) and stored as x * 1000/1024, 2.3% short. They are whole milliseconds:
+    60000 / mean(RR) matches the strap's own heart rate to 0.3% at rest. Undo the scaling and
+    queue the last week for cloud_sync. Every stored rr_ms came from the strap conversion
+    (imports store ""), so all non-empty rows are rescaled.
+    """
+    # The marker is the file's user_version, not a sync_state row: clearing sync_state (tests,
+    # a reset) must never scale the beats a second time.
+    if c.execute("PRAGMA user_version").fetchone()[0] >= RR_FIX_VERSION:
+        return 0
+    c.execute("BEGIN IMMEDIATE")
+    if c.execute("PRAGMA user_version").fetchone()[0] >= RR_FIX_VERSION:   # another process did it
+        c.rollback()
+        return 0
+    rows = c.execute("SELECT ts, rr_ms FROM ble_hr WHERE rr_ms IS NOT NULL AND rr_ms != ''").fetchall()
+    fixed = []
+    for r in rows:
+        try:
+            vals = [round(float(x) * 1024 / 1000) for x in r["rr_ms"].split()]
+        except ValueError:
+            continue
+        fixed.append((" ".join(map(str, vals)), r["ts"]))
+    c.executemany("UPDATE ble_hr SET rr_ms = ? WHERE ts = ?", fixed)
+    # HRV (RMSSD) computed from those beats scales the same way. scores.py recomputes its
+    # last week on its own; these tables are written once and kept.
+    for table, col in (("daily_night", "hrv"), ("sleep_night", "hrv"), ("stress", "rmssd")):
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            c.execute(f"UPDATE {table} SET {col} = {col} * 1.024 WHERE {col} IS NOT NULL")
+    c.execute("CREATE TABLE IF NOT EXISTS cloud_hr_pending (ts REAL PRIMARY KEY)")
+    c.execute("INSERT OR IGNORE INTO cloud_hr_pending(ts) SELECT ts FROM ble_hr "
+              "WHERE ts >= ? AND rr_ms != ''", (time.time() - RR_FIX_REPUSH_DAYS * 86400,))
+    c.execute(f"PRAGMA user_version = {RR_FIX_VERSION}")
+    c.commit()
+    return len(fixed)
+
+
 def connect():
     c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
@@ -88,6 +131,7 @@ def connect():
     c.execute("PRAGMA synchronous=NORMAL")
     c.executescript(SCHEMA)
     add_columns(c, ADDED)
+    fix_rr_units(c)
     return c
 
 def get_state(c, key, default=None):

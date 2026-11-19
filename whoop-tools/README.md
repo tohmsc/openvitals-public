@@ -277,6 +277,34 @@ python energy.py show
 ```
 It is a rough estimate: on held-out WHOOP days it was off by about 16%, on workouts by 18%.
 
+## Readiness (`readiness.py`)
+One plain read of today, built on the baselines the system already has (`learn.py`'s usual,
+`alerts.py`'s runs) plus training load:
+
+| Signal | Compared how |
+|---|---|
+| HRV | last night against your usual, on the log scale, in units of your own night-to-night variation |
+| Resting HR | last night against your usual, in units of your variation |
+| Breathing rate | the sleep estimate's rate against your earlier nights; only a rise counts |
+| Training load | mean Strain of the last 7 complete days over the last 28 (acute:chronic, needs 14 days) |
+
+Each gets good / neutral / watch / bad; an alert that is on turns its signal bad. The headline is
+**Primed** (2+ good, nothing to watch), **Balanced**, **Strained** (one red flag) or **Run down**
+(two, or recovery down while load spikes); **Learning** until there are 7 nights of your own.
+Thresholds are the published ones (Plews, Buchheit, Lamberts, Gabbett) that NOOP also uses.
+NOOP's training-monotony flag is left out: Strain never drops to 0 on a rest day, so it fires
+nearly every week. `python readiness.py [date]` prints it.
+
+## Ask an AI assistant about your data (`mcp_server.py`)
+A local MCP server, so Claude Desktop, Claude Code or any MCP client can read your data from
+`whoop.db`. It runs on this Mac over stdio, never talks to the strap and never writes your data
+(`sql` runs on a read-only connection). Tools: `today`, `readiness`, `nights`, `scores`,
+`heart_rate`, `schema`, `sql`.
+```bash
+claude mcp add openvitals -- ~/whoop-os/whoop-tools/.venv/bin/python ~/whoop-os/whoop-tools/mcp_server.py
+```
+What it reads goes to the assistant's model like anything else you paste into a chat.
+
 ## Silent alarm and buzz (`alarm.py`)
 
 The strap can vibrate on command and has its own alarm clock. Once the alarm is set on the
@@ -390,6 +418,9 @@ launchctl load ~/Library/LaunchAgents/com.whoop.dashboard.plist
 | `stress.py` | stress monitor: 0-3 every 5 minutes while you're still and awake, heart rate and HRV against your own calm (method and sources in the file) |
 | `alerts.py` | health alerts: resting HR up, HRV down, short sleep, breathing rate up, very low recovery, each 3 clean nights in a row; pattern-matching, not a diagnosis |
 | `test_stress.py` / `test_alerts.py` | tests for both on synthetic days and nights |
+| `readiness.py` / `test_readiness.py` | readiness: Primed / Balanced / Strained / Run down from HRV, resting HR, breathing rate and training load against your own usual |
+| `mcp_server.py` / `test_mcp.py` | local MCP server (stdio) so an AI assistant can read your data; read-only |
+| `test_protocol.py` | protocol checks: RR in milliseconds, the history ACK echoes the strap's block, the one-time RR rescale |
 | `metrics.py` | the numbers computed from strap heart rate (resting HR, HRV, time with HR up); shared by dashboard, Telegram and learn |
 | `config.py` | paths and `.env` reading, shared by every script |
 | `test_archive.py` | tests for the archive with a fake bucket |

@@ -25,7 +25,7 @@ class ParseTest(unittest.TestCase):
         p = whoop.parse_historical(whoop.history_record(77, T, hr=52, rr=(1100,), accel=(0.5, -0.25, 0.75),
                                                         optical=(601, 912), temp=343, steps=4321))
         self.assertEqual((p["seq"], p["ts"], p["hr"], p["rr_count"]), (77, T, 52, 1))
-        self.assertEqual(p["rr_1024"], [1100, 0, 0, 0])
+        self.assertEqual(p["rr_ms"], [1100, 0, 0, 0])
         self.assertEqual(p["accel_g"], [0.5, -0.25, 0.75])
         self.assertEqual(p["optical"], [601, 912])
         self.assertEqual((p["skin_temp_raw"], p["steps_total"]), (343, 4321))
