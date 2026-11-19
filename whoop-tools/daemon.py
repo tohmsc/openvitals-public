@@ -52,6 +52,7 @@ class Daemon:
         self.strap, self.find, self.addr = strap, find, addr
         # seconds between housekeeping runs; last-run times persist in sync_state
         self.jobs = [("decode", 300, lambda: collector.run_decode(quiet=True)),
+                     ("sleep", 300, collector.run_sleep),                                # after decode
                      ("backup", 86400, lambda: collector.run_backup(keep=7))]   # a week of dailies
         if do_cloud:
             self.jobs.append(("cloud", 3600, collector.run_cloud))

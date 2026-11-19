@@ -9,7 +9,7 @@ so we don't assert labels we aren't sure of.
 The stored 1 Hz history records (0x2F) are also folded into ble_hr, so the seconds
 the laptop was not connected get backfilled once the strap comes back in range.
 """
-import db, whoop, struct, re, time, os, fcntl, json
+import db, whoop, struct, re, time, os, fcntl, json, math
 
 EXTRA = """
 CREATE TABLE IF NOT EXISTS realtime_hr (rtc INTEGER PRIMARY KEY, hr INTEGER, rr_1024 TEXT);
@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS realtime_hr (rtc INTEGER PRIMARY KEY, hr INTEGER, rr_
 CREATE TABLE IF NOT EXISTS device_soc (rtc INTEGER PRIMARY KEY, soc_pct REAL, subsystem TEXT, seen REAL);
 CREATE TABLE IF NOT EXISTS device_logs (rtc INTEGER, subsystem TEXT, message TEXT);
 CREATE INDEX IF NOT EXISTS idx_logs_rtc ON device_logs(rtc);
+-- how much the wrist moved, per minute, from the accelerometer in the stored history
+-- (record version 24): sum of |change in the gravity vector| between consecutive seconds,
+-- and how many such steps. sleep.py reads move_sum / n. Kept after the raw frames go to R2.
+CREATE TABLE IF NOT EXISTS motion_min (minute INTEGER PRIMARY KEY, move_sum REAL NOT NULL, n INTEGER NOT NULL);
 -- raw per-sample sensor records from the historical event stream.
 -- event_cmd 63 = R10/R11 raw optical (PPG); 3 = paired sensor record.
 -- i16_json is the payload parsed as little-endian int16s (field semantics are
@@ -38,6 +42,34 @@ LOCK = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".decode.lock")
 def _put(c, key, value):
     c.execute("INSERT INTO sync_state(key,value) VALUES(?,?) "
               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+def add_motion(c, accel):
+    """Fold {unix second: (x, y, z) in g} into motion_min. Only steps between records at most
+    2 s apart count, so a gap (strap off, not yet drained) never reads as one big movement."""
+    per = {}
+    ts = sorted(accel)
+    for a, b in zip(ts, ts[1:]):
+        if b - a <= 2:
+            m = per.setdefault(int(b // 60) * 60, [0.0, 0])
+            m[0] += math.dist(accel[a], accel[b]); m[1] += 1
+    c.executemany("INSERT INTO motion_min(minute,move_sum,n) VALUES(?,?,?) ON CONFLICT(minute) DO UPDATE "
+                  "SET move_sum = move_sum + excluded.move_sum, n = n + excluded.n",
+                  [(m, v[0], v[1]) for m, v in per.items()])
+
+
+def backfill_motion(c, upto):
+    """Once: movement from stored-history frames decoded before motion_min existed."""
+    accel = {}
+    for r in c.execute("SELECT hex FROM ble_raw WHERE ptype = ? AND rowid <= ?", (whoop.T_HISTORICAL, upto)):
+        inner = bytes.fromhex(r["hex"])
+        if len(inner) > 1 and inner[1] == HR_RECORD_VERSION:
+            p = whoop.parse_historical(inner)
+            ts, g = p.get("ts"), p.get("accel_g")
+            if ts and MIN_TS < ts < time.time() + 86400 and g and all(abs(x) < 16 for x in g):
+                accel.setdefault(ts, g)
+    add_motion(c, accel)
+    _put(c, "motion_backfilled", "1")
+
 
 def run(full=False, quiet=False, force=False):
     """Decode new frames. One run at a time: two processes reading the same watermark (the
@@ -68,11 +100,13 @@ def _run(c, full, quiet, force):
               "Restore them first (archive.py restore), or pass --force to rebuild from local frames only.")
         return
     if full or last is None:
-        for t in ("realtime_hr", "device_soc", "device_logs", "strap_samples"):
+        for t in ("realtime_hr", "device_soc", "device_logs", "strap_samples", "motion_min"):
             c.execute(f"DELETE FROM {t}")
         last, carry, hold = 0, "", b""
     else:
         last = int(last)
+        if not db.get_state(c, "motion_backfilled"):
+            backfill_motion(c, last)
         carry = db.get_state(c, "decode_carry", "")
         hold = bytes.fromhex(db.get_state(c, "decode_hold", ""))
     fetched = c.execute("SELECT rowid, hex FROM ble_raw WHERE rowid > ? ORDER BY rowid", (last,)).fetchall()
@@ -147,7 +181,7 @@ def _run(c, full, quiet, force):
     # samples); reading a heart rate out of those would invent data, so they stay raw only.
     # Seconds the live stream already covered are left alone, so this only fills gaps.
     hist, oldest, newest_ts = 0, None, None
-    by_second = {}
+    by_second, accel = {}, {}
     for inner in rows:
         if inner and inner[0] == whoop.T_HISTORICAL and len(inner) > 1 and inner[1] == HR_RECORD_VERSION:
             p = whoop.parse_historical(inner)
@@ -156,6 +190,9 @@ def _run(c, full, quiet, force):
             if not ts or not (MIN_TS < ts < time.time() + 86400):
                 continue
             newest_ts = ts if newest_ts is None else max(newest_ts, ts)
+            g = p.get("accel_g")
+            if g and all(abs(x) < 16 for x in g):
+                accel.setdefault(ts, g)
             if not hr or not (25 <= hr <= 240):
                 continue
             n = p.get("rr_count") or 0
@@ -171,6 +208,7 @@ def _run(c, full, quiet, force):
                       (ts + 0.5 * i, hr, " ".join(map(str, rr))))
             hist += 1
         oldest = ts if oldest is None else min(oldest, ts)
+    add_motion(c, accel)
     if newest_ts is not None:
         # how far the strap's stored history has been read: Telegram waits for last night to be
         # in before it sends the morning message

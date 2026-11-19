@@ -6,7 +6,7 @@ works fully offline. This file only serves it plus two JSON endpoints.
 """
 import json, time, os, sys, subprocess, threading
 from flask import Flask, jsonify, request, send_from_directory
-import db, learn, metrics
+import db, learn, metrics, sleep
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -67,6 +67,7 @@ def summary():
         "personal": dict(learn.summary(c), text=learn.learned_text(c).replace("• ", "").split("\n"),
                          feel=learn.FEEL_WORD.get(feel["feel"]) if feel and feel["feel"] else None),
         "archive": {"start": arch["a"], "end": arch["b"]},
+        "nights": sleep.recent(c, 30),               # how you slept (sleep.py), newest first
         "profile": {"first_name": profile.get("first_name")},
         "recovery": rows(c, "SELECT created_at,recovery_score,hrv_rmssd_ms,resting_hr,spo2,skin_temp_c "
                              "FROM api_recovery WHERE recovery_score IS NOT NULL "

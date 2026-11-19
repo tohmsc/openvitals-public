@@ -651,6 +651,31 @@ body[data-view="heart"] { overflow: hidden; }
 .hv-card--rec[data-zone="low"] .hv-dot { background: var(--low); }
 .hv__stage[data-live="true"] ~ .hv__side .hv-card--rec[data-zone="today"] .hv-dot { background: var(--m-hr-ui); }
 
+/* ───────── Last night (Heart view) ───────── */
+.sleep[hidden] { display: none !important; }
+.sleep--stage { display: none; }
+.sleep--side { padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+.sleep__vs { font-size: 0.8125rem; color: var(--text-2); margin-top: 4px; }
+.sleep__empty { font-size: 0.8125rem; color: var(--text-3); margin-top: 6px; }
+.sleep__chart { margin-top: 16px; }
+.sleep__strip { position: relative; height: 10px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.sleep__strip span { position: absolute; top: 0; bottom: 0; }
+.sleep__strip span[data-s="s"] { background: var(--m-hrv); }
+.sleep__strip span[data-s="a"] { background: var(--g8); }
+.sleep__marks { position: relative; height: 18px; margin-top: 6px; font-size: 0.75rem; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.sleep__marks span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.sleep__marks span:first-child { transform: none; }
+.sleep__marks span:last-child { transform: translateX(-100%); }
+.sleep__facts { margin-top: 8px; font-size: 0.8125rem; color: var(--text-2); }
+.sleep__key { display: flex; gap: 12px; margin-top: 8px; font-size: 0.75rem; color: var(--text-3); }
+.sleep__key span::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 2px; vertical-align: 0; }
+.sleep__key [data-s="s"]::before { background: var(--m-hrv); }
+.sleep__key [data-s="a"]::before { background: var(--g8); }
+@media (max-width: 1320px) {
+  .sleep--stage { display: block; position: relative; padding: 0 0 4px; }
+  .sleep--side { display: none !important; }
+}
+
 /* ───────── Tab bar (phone) ───────── */
 .tabbar { display: none; }
 
