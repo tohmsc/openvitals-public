@@ -9,7 +9,10 @@ signals; everything lives in `whoop.db` on your Mac.
    and a lossless capture of the historical drain. The laptop is the strap's host:
    `daemon.py` connects whenever the strap is nearby. Files: `whoop.py`, `daemon.py`.
 2. **Official WHOOP API v2 (OAuth)** — Recovery, HRV, resting HR, SpO₂, skin temp,
-   Sleep stages, Strain, workouts. File: `whoop_api.py`.
+   Sleep stages, Strain, workouts, as an archive. File: `whoop_api.py`.
+
+From the strap's data it also computes sleep, Strain, Sleep and Recovery estimates, breathing
+rate, energy, stress and health alerts (sections below).
 
 ## One-time setup
 
@@ -203,8 +206,8 @@ author's WHOOP archive and is used only on that archive; everyone else starts on
 | Sleep need / performance | WHOOP patent's strain term (exact), your baseline 7.9 h, 43% of last night's shortfall; since May 2025 blended with efficiency and consistency | 2.0 points (hours vs need), 4.9 (blend) |
 | Recovery | Night resting HR and HRV against your own last 30 nights, plus sleep performance | 7.1 points, right zone 86% of days |
 
-Sleep stages (deep, REM) and energy (kcal) are not estimated. Sleep timing comes from
-`sleep.py`.
+Sleep stages (deep, REM) are not estimated. Energy (kcal) is a separate rough estimate (see
+"If you have your WHOOP history" below). Sleep timing comes from `sleep.py`.
 
 **Shown only when trusted.** A score shows in the app only when the data behind it passes its
 checks: at least 85% of the day recorded for strain, a finished day, a finished night for
@@ -321,7 +324,7 @@ but sent nothing at that time, so the strap ran it on its own); behaviour on oth
 ## Your dashboard on your phone (Cloudflare Worker, optional)
 
 The same app, hosted on your own Cloudflare account and reading the D1 database
-`cloud_sync.py` fills. Behind a password; installable to your home screen.
+`cloud_sync.py` fills. Behind a password, with passkey sign-in; installable to your home screen.
 
 ```bash
 # 1. D1 off-site sync must work first (see Backups): CF_API_TOKEN + CF_D1_DATABASE_ID in .env
@@ -337,6 +340,21 @@ On the phone: open the URL, sign in, then Share > Add to Home Screen. It opens f
 with a tab bar (Heart, Today, Archive, Device). The phone can't reach the strap, so data is
 as fresh as the Mac's last push; run `live.py` on the Mac for continuous heart rate.
 Change the password: edit `.dash_password`, then `npx wrangler secret put DASH_PASSWORD < ../.dash_password`.
+
+**Passkey.** After a password sign-in the app offers to add a passkey (Face ID, Touch ID or
+the device code). Once one exists, the sign-in page leads with "Sign in with a passkey" and
+the password stays as a fallback. Public keys live in the D1 table `passkeys`, which
+`cloud_sync.py` never touches. Adding a passkey needs an existing session.
+
+## Battery: strap and battery pack
+
+The daemon asks the strap for its battery after every drain (GetBatteryLevel `0x1A`, tenths
+of a percent). That is the strap's own gauge. It also reads the standard Bluetooth Battery
+Level characteristic (`0x2A19`), which gives a different number (56% while the strap said
+100.0% on the charger). That one is most likely the slide-on battery pack. Not proven: slide
+the pack off and see whether the value changes. The Device card shows both as **Strap** and
+**Battery pack**. Telegram's low-battery nudges use the strap reading only. Firmware "SOC
+report" log lines no longer set the battery: a history drain replays old ones.
 
 ## Always-on services (launchd)
 - `com.whoop.daemon` — always on: holds the strap when nearby (drain + live HR), plus API sync, decode, backup, cloud push and R2 archive + local cleanup on timers
@@ -392,7 +410,8 @@ launchctl load ~/Library/LaunchAgents/com.whoop.dashboard.plist
   usable interval), so daytime HRV is an approximation; the night reading is the one to trust.
 - While this laptop drains the strap, WHOOP's cloud receives nothing new, so the Recovery/
   Strain/Sleep archive stops where the WHOOP app last synced.
-- Recovery/Strain/Sleep scores come from the **API** (WHOOP computes them in-cloud);
-  the strap gives the raw signals those are derived from.
+- WHOOP's own Recovery/Strain/Sleep scores come from the **API** (WHOOP computes them
+  in-cloud) and stop where the archive stops. Newer days show estimates from `scores.py`,
+  labelled as estimates.
 - Apple Health can't be read/written from macOS (HealthKit is iOS-only). To fold in
   existing Health history, export it from the iPhone Health app and parse the XML.
