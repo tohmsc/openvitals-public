@@ -107,14 +107,16 @@ def unframe(buf: bytes):
 
 
 def parse_realtime(inner: bytes):
-    # inner = [0x28][ver][ts u32 LE @2][subsec u16 @6][hr @8][rrN @9][4×u16 RR @10..18]
+    # inner = [0x28][ver][ts u32 LE @2][subsec u16 @6][hr @8][rrN @9][4×u16 RR in ms @10..18]
+    # RR is whole milliseconds, not 1/1024 s like the standard Heart Rate service (0x2A37):
+    # at rest 60000 / mean(RR) matches the strap's own HR to 0.3% (1/1024 s would be 2.4% off).
     if len(inner) < 10:
         return None
     ts = struct.unpack_from("<I", inner, 2)[0]
     hr = inner[8]
     n = min(inner[9], 4, (len(inner) - 10) // 2)      # never read past a short frame
     rr = [struct.unpack_from("<H", inner, 10 + 2 * i)[0] for i in range(n)]
-    return {"ts": ts, "hr": hr, "rr_1024": rr}
+    return {"ts": ts, "hr": hr, "rr_ms": rr}
 
 
 HIST_V24_LEN = 93       # payload bytes after [type][version][cmd] in a version-24 record
@@ -126,7 +128,7 @@ def parse_historical(inner: bytes):
 
     Version 24 (93 data bytes), checked against two stored nights (see decode.py):
       0 seq u32 (+1 per record, also across the time the strap was off the wrist)
-      4 ts u32, 14 hr, 15 RR count, 16 4x RR u16 (1/1024 s)  - hr and RR match the live stream
+      4 ts u32, 14 hr, 15 RR count, 16 4x RR u16 (ms)        - hr and RR match the live stream
       33 accel x,y,z f32 in g (49-60 repeat them)              - movement matches sleep/walks
       61 optical level A u16, 65 optical level B u16           - both fall to ~547 (no light)
          the second the strap comes off; which LED/wavelength each is, is NOT known
@@ -146,7 +148,7 @@ def parse_historical(inner: bytes):
         "ts": struct.unpack_from("<I", d, 4)[0],
         "hr": d[14],
         "rr_count": d[15],
-        "rr_1024": [struct.unpack_from("<H", d, 16 + 2 * i)[0] for i in range(4)],
+        "rr_ms": [struct.unpack_from("<H", d, 16 + 2 * i)[0] for i in range(4)],
     }
     if inner[1] == 24 and len(d) >= HIST_V24_LEN:
         rec["accel_g"] = list(struct.unpack_from("<3f", d, 33))
@@ -221,10 +223,17 @@ def parse_alarm(body: bytes):
 
 
 def parse_metadata(inner: bytes):
+    """History metadata: subtype 1 start, 2 end of a chunk (HISTORY_END), 3 complete.
+
+    HISTORY_END data: 0 unix u32, 4 subsec u16, 6 unmapped u32, 10 the 8-byte ack block.
+    The block's first u32 is the trim cursor; the second (constant 22 on this strap so far)
+    is write-wrap state. The block goes back to the strap exactly as received.
+    """
     sub = inner[2]
     d = inner[3:]
     trim = struct.unpack_from("<I", d, 10)[0] if len(d) >= 14 else None
-    return {"subtype": sub, "trim": trim}  # 1 start, 2 end, 3 complete
+    ack = bytes(d[10:18]) if len(d) >= 18 else None
+    return {"subtype": sub, "trim": trim, "ack": ack}
 
 
 class Whoop:
@@ -286,7 +295,7 @@ class Whoop:
             if self.on_meta:
                 self.on_meta(m)
             if m["subtype"] == 2 and m["trim"] is not None:   # HISTORY_END -> ACK
-                asyncio.create_task(self._ack(m["trim"]))
+                asyncio.create_task(self._ack(m["trim"], m["ack"]))
             if m["subtype"] == 3:                              # COMPLETE
                 self._hist_done.set()
         elif t == T_CMD_RESP:
@@ -355,8 +364,11 @@ class Whoop:
         """Ring the alarm now (the strap's full alarm buzz, until stopped or it times out)."""
         return await self.request(C_RUN_ALARM, b"\x01")
 
-    async def _ack(self, trim):
-        await self.send(cmd(C_HIST_ACK, struct.pack("<BII", 1, trim, 0)))
+    async def _ack(self, trim, block=None):
+        # Echo the strap's own 8-byte block (trim cursor + wrap state). Rebuilding it as
+        # (trim, 0) also worked, but the wrap word is the strap's to keep, not ours to zero.
+        body = block if block and len(block) == 8 else struct.pack("<II", trim, 0)
+        await self.send(cmd(C_HIST_ACK, b"\x01" + body))
 
     async def init(self):
         await self.send(cmd(C_HELLO_HARVARD, b"\x00"))
@@ -426,7 +438,7 @@ async def cli():
             f = open(os.path.join(HERE, f"live_{stamp}.csv"), "w", newline="")
             wr = csv.writer(f); wr.writerow(["iso", "hr", "rr_ms"])
             def rt(r):
-                rr = [round(x / 1024 * 1000, 1) for x in r["rr_1024"] if x]
+                rr = [x for x in r["rr_ms"] if x]
                 wr.writerow([dt.datetime.now().isoformat(), r["hr"], " ".join(map(str, rr))]); f.flush()
                 print(f"HR {r['hr']:3d}  RR {rr}")
             w.on_realtime = rt

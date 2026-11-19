@@ -13,6 +13,7 @@ Version 25 records (a 40 s burst of one 24 Hz optical channel every ~20 minutes)
 import db, whoop, struct, re, time, os, fcntl, json, math
 
 EXTRA = """
+-- rr_1024 is a historical name: the values are raw strap RR, which is whole milliseconds.
 CREATE TABLE IF NOT EXISTS realtime_hr (rtc INTEGER PRIMARY KEY, hr INTEGER, rr_1024 TEXT);
 -- rtc is the firmware's tick counter (restarts when the strap reboots); `seen` is when we
 -- decoded the report, so "latest" and chart order survive a reboot.
@@ -383,7 +384,7 @@ def backfill_history(c, rows):
             if not hr or not (25 <= hr <= 240):
                 continue
             k = p.get("rr_count") or 0
-            rr = [round(x / 1024 * 1000, 1) for x in p["rr_1024"][:k] if x] if k <= 4 else []
+            rr = [x for x in p["rr_ms"][:k] if x] if k <= 4 else []
             by_second.setdefault(ts, []).append((hr, rr))
     # cloud_sync pushes heart rate newer than its watermark; rows filled in behind it are
     # queued so it pushes exactly those (pulling the watermark back re-sent everything newer,

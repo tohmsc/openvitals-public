@@ -29,7 +29,7 @@ async def stream_once(c):
 
         def rt(r):
             now = time.time()
-            rr = [round(x/1024*1000, 1) for x in r["rr_1024"] if x]
+            rr = [x for x in r["rr_ms"] if x]
             if r["hr"] > 0:        # 0 = off the wrist: not a heart rate
                 c.execute("INSERT OR REPLACE INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)",
                           (now, r["hr"], " ".join(map(str, rr))))

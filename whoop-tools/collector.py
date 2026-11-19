@@ -87,7 +87,7 @@ def raw_sink_for(c, skip=()):
     return raw_sink
 
 def rr_ms(r):
-    return [round(x / 1024 * 1000, 1) for x in r["rr_1024"] if x]
+    return [x for x in r["rr_ms"] if x]        # the strap sends whole milliseconds
 
 # ---- the non-Bluetooth steps, shared with daemon.py ----
 # Each returns False when it failed, so the daemon retries soon instead of a full interval later.

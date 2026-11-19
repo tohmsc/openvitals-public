@@ -58,7 +58,7 @@ class FakeStrap:
         while self.client.is_connected:
             hr = self.hrs[self.sent % len(self.hrs)]
             self.raw_sink(whoop.CH_DATA, bytes([whoop.T_REALTIME]) + b"\x00" * 19)
-            self.on_realtime({"ts": 31_500_000, "hr": hr, "rr_1024": [1024, 0]})   # strap RTC (whole seconds)
+            self.on_realtime({"ts": 31_500_000, "hr": hr, "rr_ms": [1024, 0]})   # strap RTC (whole seconds)
             self.sent += 1
             if self.drop_after and self.sent >= self.drop_after:
                 self.client.is_connected = False
@@ -619,13 +619,13 @@ class DecodeTest(unittest.TestCase):
         for s in (3, 4, 5):                                  # the live stream covered these seconds
             c.execute("INSERT INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)", (T + s + 0.13, 70, ""))
         db.set_state(c, "cloud_hr_ts", T + 5.13)             # ...and they were already pushed
-        frames = [self.history(T + s, 60 + s, rr=(1024,)) for s in range(6)]   # strap stored 0..5
+        frames = [self.history(T + s, 60 + s, rr=(1000,)) for s in range(6)]   # strap stored 0..5, RR in ms
         frames += [self.history(T + 6, 0),                   # off the wrist
                    self.history(31_500_000, 66)]             # clock never set (1971)
         self.load(frames, c)
         decode.run(quiet=True)
         got = [(r["ts"], r["hr"], r["rr_ms"]) for r in c.execute("SELECT * FROM ble_hr WHERE ts < ? ORDER BY ts", (T + 3,))]
-        self.assertEqual(got, [(T + 0.0, 60, "1000.0"), (T + 1.0, 61, "1000.0"), (T + 2.0, 62, "1000.0")])
+        self.assertEqual(got, [(T + 0.0, 60, "1000"), (T + 1.0, 61, "1000"), (T + 2.0, 62, "1000")])
         self.assertEqual(c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 6)   # 3 live + 3 backfilled
         self.assertEqual(float(db.get_state(c, "cloud_hr_ts")), T + 5.13)     # the watermark stays...
         self.assertEqual([r["ts"] for r in c.execute("SELECT ts FROM cloud_hr_pending ORDER BY ts")],
