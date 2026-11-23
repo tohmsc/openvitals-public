@@ -149,6 +149,32 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(metrics.steps(self.c, T, T + 600), 58)
         self.assertIsNone(metrics.steps(self.c, T + 3600, T + 7200))
 
+    def test_motion_is_not_double_counted_on_second_decode_run(self):
+        frames = [rec(i, accel=(0.0, 0.0, 1.0 + 0.02 * (i % 2))) for i in range(60)]
+        self.load(frames)
+        decode.run(quiet=True)
+        first = self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone()
+        self.load([rec(100, ts=T + 120)])
+        decode.run(quiet=True)
+        second = self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone()
+        self.assertEqual((first["n"], first["move_sum"]), (second["n"], second["move_sum"]))
+
+    def test_bad_hex_row_does_not_stall_decode(self):
+        self.c.execute("INSERT INTO ble_raw(ts,channel,ptype,hex) VALUES(?,?,?,?)", (T, "0005", 0x2F, "not-valid-hex"))
+        self.c.commit()
+        self.load([rec(0, hr=62)])
+        decode.run(quiet=True)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 1)
+
+    def test_backfill_commits_even_when_no_new_frames_arrived(self):
+        self.load(self.night())
+        decode.run(quiet=True)
+        self.c.execute("DELETE FROM strap_min"); self.c.execute("DELETE FROM offwrist")
+        self.c.execute("DELETE FROM sync_state WHERE key LIKE 'strap%'"); self.c.commit()
+        decode.run(quiet=True)                                # no new frames after watermark
+        self.assertEqual(len(self.table()), 3)
+        self.assertEqual(db.get_state(self.c, "strap_backfilled"), "1")
+
 
 class NightTest(unittest.TestCase):
     def setUp(self):

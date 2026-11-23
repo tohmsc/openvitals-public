@@ -110,12 +110,17 @@ def pack(rows, path):
 
 def unpack(path, encrypted):
     """Read a packed file back into a list of row dicts."""
+    plain = None
     if encrypted:
         plain = path + ".plain"
         _openssl(["-d", "-in", path, "-out", plain])
         path = plain
-    with gzip.open(path, "rt") as f:
-        return [json.loads(line) for line in f]
+    try:
+        with gzip.open(path, "rt") as f:
+            return [json.loads(line) for line in f]
+    finally:
+        if plain and os.path.exists(plain):
+            os.remove(plain)
 
 
 def key_for(hour, first, last, encrypted):
@@ -136,53 +141,61 @@ def run(store=None, keep_hours=None, quiet=False):
     if keep_hours is None:
         keep_hours = float(e.get("CF_R2_KEEP_HOURS") or 24)
     c = db.connect()
-    decoded = int(db.get_state(c, "decode_rowid", 0) or 0)
-    newest = c.execute("SELECT MAX(rowid) m FROM ble_raw").fetchone()["m"] or 0
-    before = int((time.time() - keep_hours * 3600) // 3600)          # first hour that must stay
-    hours = [r["h"] for r in c.execute(
-        "SELECT DISTINCT CAST(ts / 3600 AS INTEGER) h FROM ble_raw WHERE ts < ? ORDER BY h", (before * 3600,))]
-    moved = 0
-    for hour in hours:
-        rows = c.execute(f"SELECT {','.join(COLS)} FROM ble_raw WHERE ts >= ? AND ts < ? ORDER BY rowid",
-                         (hour * 3600, (hour + 1) * 3600)).fetchall()
-        first, last = rows[0]["rowid"], rows[-1]["rowid"]
-        # Never move frames decode.py hasn't read yet, and never the newest row: SQLite hands
-        # out rowid = max + 1, so emptying the table would restart numbering below decode's
-        # watermark and new frames would be skipped. (For the same reason: don't VACUUM.)
-        if last > decoded or last >= newest:
-            break
-        with tempfile.TemporaryDirectory(prefix="whoop-archive-") as tmp:
-            path, enc = pack(rows, os.path.join(tmp, "up.ndjson.gz"))
-            key, digest, size = key_for(hour, first, last, enc), sha256(path), os.path.getsize(path)
-            try:
-                store.put(key, path)
-                back = os.path.join(tmp, "down")
-                store.get(key, back)
-                if sha256(back) != digest:
-                    raise RuntimeError("downloaded copy differs from what was uploaded")
-                if [r["rowid"] for r in unpack(back, enc)] != [r["rowid"] for r in rows]:
-                    raise RuntimeError("downloaded copy does not unpack to the same rows")
-            except Exception as ex:
-                print(f"archive: {key} not confirmed, keeping the local rows ({ex})")
+    try:
+        decoded = int(db.get_state(c, "decode_rowid", 0) or 0)
+        newest = c.execute("SELECT MAX(rowid) m FROM ble_raw").fetchone()["m"] or 0
+        before = int((time.time() - keep_hours * 3600) // 3600)          # first hour that must stay
+        hours = [r["h"] for r in c.execute(
+            "SELECT DISTINCT CAST(ts / 3600 AS INTEGER) h FROM ble_raw WHERE ts < ? ORDER BY h", (before * 3600,))]
+        moved = 0
+        for hour in hours:
+            rows = c.execute(f"SELECT {','.join(COLS)} FROM ble_raw WHERE ts >= ? AND ts < ? ORDER BY rowid",
+                             (hour * 3600, (hour + 1) * 3600)).fetchall()
+            if not rows:
+                continue
+            first, last = rows[0]["rowid"], rows[-1]["rowid"]
+            # Never move frames decode.py hasn't read yet, and never the newest row: SQLite hands
+            # out rowid = max + 1, so emptying the table would restart numbering below decode's
+            # watermark and new frames would be skipped. (For the same reason: don't VACUUM.)
+            if last > decoded or last >= newest:
                 break
-        c.execute("INSERT OR REPLACE INTO raw_archive(key,hour,first_rowid,last_rowid,rows,bytes,sha256,encrypted,archived_at) "
-                  "VALUES(?,?,?,?,?,?,?,?,?)", (key, hour, first, last, len(rows), size, digest, int(enc), time.time()))
-        c.execute("DELETE FROM ble_raw WHERE rowid >= ? AND rowid <= ? AND ts >= ? AND ts < ?",
-                  (first, last, hour * 3600, (hour + 1) * 3600))
-        c.commit()                                    # index row and delete land together
-        moved += 1
-        if not quiet:
-            print(f"archived {len(rows)} raw frames -> {key} ({size // 1024} KB), removed locally")
-    if moved and quiet:
-        print(f"archive: moved {moved} hour(s) of raw frames to R2 and removed them locally")
-    return moved
+            with tempfile.TemporaryDirectory(prefix="whoop-archive-") as tmp:
+                path, enc = pack(rows, os.path.join(tmp, "up.ndjson.gz"))
+                key, digest, size = key_for(hour, first, last, enc), sha256(path), os.path.getsize(path)
+                try:
+                    store.put(key, path)
+                    back = os.path.join(tmp, "down")
+                    store.get(key, back)
+                    if sha256(back) != digest:
+                        raise RuntimeError("downloaded copy differs from what was uploaded")
+                    if [r["rowid"] for r in unpack(back, enc)] != [r["rowid"] for r in rows]:
+                        raise RuntimeError("downloaded copy does not unpack to the same rows")
+                except Exception as ex:
+                    print(f"archive: {key} not confirmed, keeping the local rows ({ex})")
+                    break
+            c.execute("INSERT OR REPLACE INTO raw_archive(key,hour,first_rowid,last_rowid,rows,bytes,sha256,encrypted,archived_at) "
+                      "VALUES(?,?,?,?,?,?,?,?,?)", (key, hour, first, last, len(rows), size, digest, int(enc), time.time()))
+            c.execute("DELETE FROM ble_raw WHERE rowid >= ? AND rowid <= ? AND ts >= ? AND ts < ?",
+                      (first, last, hour * 3600, (hour + 1) * 3600))
+            c.commit()                                    # index row and delete land together
+            moved += 1
+            if not quiet:
+                print(f"archived {len(rows)} raw frames -> {key} ({size // 1024} KB), removed locally")
+        if moved and quiet:
+            print(f"archive: moved {moved} hour(s) of raw frames to R2 and removed them locally")
+        return moved
+    finally:
+        c.close()
 
 
 def status():
     c = db.connect()
-    r = c.execute("SELECT COUNT(*) n, COALESCE(SUM(rows),0) rows, COALESCE(SUM(bytes),0) b, "
-                  "MIN(hour) a, MAX(hour) z FROM raw_archive").fetchone()
-    local = c.execute("SELECT COUNT(*) n, MIN(ts) a FROM ble_raw").fetchone()
+    try:
+        r = c.execute("SELECT COUNT(*) n, COALESCE(SUM(rows),0) rows, COALESCE(SUM(bytes),0) b, "
+                      "MIN(hour) a, MAX(hour) z FROM raw_archive").fetchone()
+        local = c.execute("SELECT COUNT(*) n, MIN(ts) a FROM ble_raw").fetchone()
+    finally:
+        c.close()
     hr = lambda h: time.strftime("%Y-%m-%d %H:00Z", time.gmtime(h * 3600))
     if r["n"]:
         print(f"in R2: {r['n']} objects, {r['rows']} raw frames, {r['b'] / 1e6:.1f} MB, {hr(r['a'])} to {hr(r['z'])}")
@@ -205,28 +218,35 @@ def _hour(s):
 def restore(out_path, start=None, end=None, store=None):
     """Download archived frames into a separate SQLite file (never into the live DB)."""
     e = env()
-    store = store or R2(e["CF_R2_BUCKET"], e)
+    if store is None:
+        if not e.get("CF_R2_BUCKET"):
+            raise SystemExit("Set CF_R2_BUCKET in .env first (see the top of archive.py).")
+        store = R2(e["CF_R2_BUCKET"], e)
     c = db.connect()
-    q, a = "SELECT * FROM raw_archive WHERE 1=1", []
-    if start is not None: q += " AND hour >= ?"; a.append(start)
-    if end is not None: q += " AND hour < ?"; a.append(end)
     out = sqlite3.connect(out_path)
-    out.execute("CREATE TABLE IF NOT EXISTS ble_raw (ts REAL, channel TEXT, ptype INTEGER, hex TEXT)")
-    total = 0
-    for a_row in c.execute(q + " ORDER BY hour", a).fetchall():
-        with tempfile.TemporaryDirectory(prefix="whoop-restore-") as tmp:
-            path = os.path.join(tmp, "down")
-            store.get(a_row["key"], path)
-            if sha256(path) != a_row["sha256"]:
-                raise SystemExit(f"{a_row['key']}: checksum mismatch, stopping")
-            rows = unpack(path, a_row["encrypted"])
-        out.executemany("INSERT OR REPLACE INTO ble_raw(rowid,ts,channel,ptype,hex) VALUES(?,?,?,?,?)",
-                        [tuple(r[k] for k in COLS) for r in rows])
-        out.commit()
-        total += len(rows)
-        print(f"restored {len(rows)} frames from {a_row['key']}")
-    print(f"{total} raw frames -> {out_path}")
-    return total
+    try:
+        q, a = "SELECT * FROM raw_archive WHERE 1=1", []
+        if start is not None: q += " AND hour >= ?"; a.append(start)
+        if end is not None: q += " AND hour < ?"; a.append(end)
+        out.execute("CREATE TABLE IF NOT EXISTS ble_raw (ts REAL, channel TEXT, ptype INTEGER, hex TEXT)")
+        total = 0
+        for a_row in c.execute(q + " ORDER BY hour", a).fetchall():
+            with tempfile.TemporaryDirectory(prefix="whoop-restore-") as tmp:
+                path = os.path.join(tmp, "down")
+                store.get(a_row["key"], path)
+                if sha256(path) != a_row["sha256"]:
+                    raise SystemExit(f"{a_row['key']}: checksum mismatch, stopping")
+                rows = unpack(path, a_row["encrypted"])
+            out.executemany("INSERT OR REPLACE INTO ble_raw(rowid,ts,channel,ptype,hex) VALUES(?,?,?,?,?)",
+                            [tuple(r[k] for k in COLS) for r in rows])
+            out.commit()
+            total += len(rows)
+            print(f"restored {len(rows)} frames from {a_row['key']}")
+        print(f"{total} raw frames -> {out_path}")
+        return total
+    finally:
+        out.close()
+        c.close()
 
 
 if __name__ == "__main__":
@@ -234,9 +254,20 @@ if __name__ == "__main__":
     if args[:1] == ["status"]:
         status()
     elif args[:1] == ["restore"] and len(args) > 1:
-        opt = lambda name: _hour(args[args.index(name) + 1]) if name in args else None
-        restore(args[1], opt("--from"), opt("--to"))
+        def _opt(name):
+            if name not in args:
+                return None
+            i = args.index(name)
+            if i + 1 >= len(args):
+                raise SystemExit(f"{name} requires a UTC time (e.g. 2026-11-18T10)")
+            return _hour(args[i + 1])
+        restore(args[1], _opt("--from"), _opt("--to"))
     else:
-        keep = float(args[args.index("--keep-hours") + 1]) if "--keep-hours" in args else None
+        keep = None
+        if "--keep-hours" in args:
+            i = args.index("--keep-hours")
+            if i + 1 >= len(args):
+                raise SystemExit("--keep-hours requires a number")
+            keep = float(args[i + 1])
         run(keep_hours=keep)
         status()

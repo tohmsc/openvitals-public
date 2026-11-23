@@ -43,7 +43,8 @@ def jitter_minutes(sd):
 
 
 def main():
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    if os.path.dirname(OUT):
+        os.makedirs(os.path.dirname(OUT), exist_ok=True)
     if os.path.exists(OUT):
         os.remove(OUT)
     c = sqlite3.connect(OUT)
@@ -207,6 +208,8 @@ def stream():
         c.execute("INSERT OR REPLACE INTO sync_state(key,value) VALUES('live_hr_now',?)",
                   (json.dumps({"hr": None, "ts": time.time()}),))
         c.commit()
+    finally:
+        c.close()
 
 
 if __name__ == "__main__":
