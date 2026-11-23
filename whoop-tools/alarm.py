@@ -276,37 +276,41 @@ async def _direct(c, what, arg=None):
 def cli(argv):
     import collector
     c = db.connect()
-    mode = argv[0] if argv else "alarm"
-    rest = argv[1:]
-    daemon = collector.lock_holder()
-    if mode == "buzz":
-        arg = {"pattern": int(rest[0]) if rest else 2, "loops": int(rest[1]) if len(rest) > 1 else 1}
-        whoop.haptics_payload(arg["pattern"], arg["loops"])            # validate early
-        if not daemon:
-            return asyncio.run(_direct(c, "buzz", arg))
-        r = wait(c, request(c, "buzz", arg))
-        print({"done": "buzz sent", "pending": "the daemon is not connected to the strap yet",
-               "expired": "the strap was not connected"}.get(r["status"], f"buzz {r['status']}: {r['result']}"))
-        return 0 if r["status"] == "done" else 1
-    if mode != "alarm":
-        print(__doc__)
-        return 2
-    sub = rest[0] if rest else "show"
-    if sub == "off":
-        turn_off(c)
-    elif sub != "show":
-        set_alarm(c, sub, daily=not (len(rest) > 1 and rest[1] == "once"))
-    if sub != "show":
-        if daemon:                                       # set_alarm/turn_off queued a request
-            rid = c.execute("SELECT MAX(id) FROM strap_cmd WHERE kind='alarm'").fetchone()[0]
-            wait(c, rid, timeout=10)
-            end = time.time() + 8                        # the sync itself runs right after
-            while due_for_sync(c) and time.time() < end:
-                time.sleep(0.3)
-        else:
-            asyncio.run(_direct(c, "alarm"))
-    print(describe(status(c)))
-    return 0
+    try:
+        mode = argv[0] if argv else "alarm"
+        rest = argv[1:]
+        daemon = collector.lock_holder()
+        if mode == "buzz":
+            arg = {"pattern": int(rest[0]) if rest else 2, "loops": int(rest[1]) if len(rest) > 1 else 1}
+            whoop.haptics_payload(arg["pattern"], arg["loops"])            # validate early
+            if not daemon:
+                return asyncio.run(_direct(c, "buzz", arg))
+            r = wait(c, request(c, "buzz", arg))
+            st = r["status"] if r else "unknown"
+            print({"done": "buzz sent", "pending": "the daemon is not connected to the strap yet",
+                   "expired": "the strap was not connected"}.get(st, f"buzz {st}: {r['result'] if r else ''}"))
+            return 0 if st == "done" else 1
+        if mode != "alarm":
+            print(__doc__)
+            return 2
+        sub = rest[0] if rest else "show"
+        if sub == "off":
+            turn_off(c)
+        elif sub != "show":
+            set_alarm(c, sub, daily=not (len(rest) > 1 and rest[1] == "once"))
+        if sub != "show":
+            if daemon:                                       # set_alarm/turn_off queued a request
+                rid = c.execute("SELECT MAX(id) FROM strap_cmd WHERE kind='alarm'").fetchone()[0]
+                wait(c, rid, timeout=10)
+                end = time.time() + 8                        # the sync itself runs right after
+                while due_for_sync(c) and time.time() < end:
+                    time.sleep(0.3)
+            else:
+                asyncio.run(_direct(c, "alarm"))
+        print(describe(status(c)))
+        return 0
+    finally:
+        c.close()
 
 
 if __name__ == "__main__":
