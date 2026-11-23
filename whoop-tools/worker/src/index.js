@@ -26,7 +26,8 @@ function safeEqual(a, b) {
 }
 function readCookie(req, name) {
   const m = (req.headers.get("cookie") || "").match(new RegExp(`(?:^|; )${name}=([^;]+)`));
-  return m ? decodeURIComponent(m[1]) : null;
+  if (!m) return null;
+  try { return decodeURIComponent(m[1]); } catch { return null; }
 }
 async function authed(req, env) {
   const v = readCookie(req, COOKIE);
@@ -215,6 +216,7 @@ async function newChallenge(env, purpose) {
   return b64u.enc(enc.encode(`${body}.${await sign(env.SESSION_SECRET, body)}`));
 }
 async function useChallenge(env, purpose, challenge) {
+  if (typeof challenge !== "string" || !env.SESSION_SECRET) return false;
   const parts = new TextDecoder().decode(b64u.dec(challenge)).split(".");
   if (parts.length !== 4) return false;
   const [p, exp, nonce, sig] = parts;
@@ -245,14 +247,17 @@ async function checkCeremony(env, url, type, purpose, clientDataB64, authDataB64
 
 // WebAuthn ECDSA signatures are DER; WebCrypto wants raw r||s.
 function derToRaw(der) {
+  if (der.length < 8 || der[0] !== 0x30) throw new Error("bad der");
   let i = 2;
   if (der[1] & 0x80) i = 2 + (der[1] & 0x7f);
   const part = () => {
-    i++; // 0x02
+    if (i + 2 > der.length || der[i++] !== 0x02) throw new Error("bad der");
     const len = der[i++];
+    if (i + len > der.length) throw new Error("bad der");
     let x = der.slice(i, i + len);
     i += len;
     while (x.length > 32 && x[0] === 0) x = x.slice(1);
+    if (x.length > 32) throw new Error("bad der");
     const out = new Uint8Array(32);
     out.set(x, 32 - x.length);
     return out;
@@ -265,11 +270,11 @@ function derToRaw(der) {
 
 async function registerOptions(env, url) {
   await ensureSchema(env);
-  const [name, existing] = await env.DB.batch([
-    env.DB.prepare("SELECT value FROM api_profile WHERE key='first_name'"),
-    env.DB.prepare("SELECT id FROM passkeys"),
-  ]);
-  const who = name.results[0]?.value || "Vitals";
+  let who = "Vitals";
+  try {
+    who = (await env.DB.prepare("SELECT value FROM api_profile WHERE key='first_name'").first("value")) || "Vitals";
+  } catch { /* api_profile not synced yet */ }
+  const existing = await env.DB.prepare("SELECT id FROM passkeys").all();
   return {
     challenge: await newChallenge(env, "reg"),
     rp: { name: "Vitals", id: url.hostname },
@@ -312,7 +317,8 @@ async function verifyLogin(env, url, body) {
 }
 
 async function summary(env, url) {
-  const since = Number(url.searchParams.get("since")) || Date.now() / 1000 - 86400;
+  const rawSince = Number(url.searchParams.get("since"));
+  const since = Number.isFinite(rawSince) && rawSince > 0 ? rawSince : Date.now() / 1000 - 86400;
   const DB = env.DB;
   await ensureSchema(env);
   const [profile, recovery, sleep, cycle, workout, soc, logs, meta, today, arch, est] = await DB.batch([
@@ -442,9 +448,14 @@ export default {
 
     if (path === "/login") {
       if (req.method === "POST") {
-        const form = await req.formData();
-        const pw = String(form.get("password") || "");
-        if (env.DASH_PASSWORD && safeEqual(await sign("pw", pw), await sign("pw", env.DASH_PASSWORD))) {
+        let pw = "";
+        try {
+          const form = await req.formData();
+          pw = String(form.get("password") || "");
+        } catch {
+          return html(LOGIN("Invalid sign-in request.", (await passkeyCount(env)) > 0), 400);
+        }
+        if (env.DASH_PASSWORD && env.SESSION_SECRET && safeEqual(await sign("pw", pw), await sign("pw", env.DASH_PASSWORD))) {
           return startSession(env, "/passkey"); // offer a passkey; the page skips itself if this device has one
         }
         await new Promise((r) => setTimeout(r, 600)); // slow down guessing
@@ -454,6 +465,7 @@ export default {
       return html(LOGIN("", (await passkeyCount(env)) > 0));
     }
     if (path === "/passkey/login/options" && req.method === "POST") {
+      if (!env.SESSION_SECRET) return json({ error: "not configured" }, 500);
       await ensureSchema(env);
       return json({ challenge: await newChallenge(env, "auth"), rpId: url.hostname });
     }
