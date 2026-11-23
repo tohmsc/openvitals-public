@@ -822,5 +822,40 @@ class BatteryTest(unittest.TestCase):
         self.assertEqual(metrics.battery(db.connect()), 88.5)
 
 
+class DaemonRobustnessTest(unittest.TestCase):
+    def setUp(self):
+        FakeStrap.made = []
+        c = db.connect()
+        for t in ("ble_hr", "ble_raw", "clock_sync", "sync_state", "host_log", "strap_cmd"):
+            c.execute(f"DELETE FROM {t}")
+        c.commit()
+        c.close()
+
+    def test_drain_ble_error_propagates_and_reconnects(self):
+        calls = [0]
+
+        class FailFirstDrain(FakeStrap):
+            async def drain(self, timeout=90):
+                calls[0] += 1
+                if calls[0] == 1:
+                    raise TimeoutError("BLE write timed out")
+                return await super().drain(timeout=timeout)
+
+        d = make()
+        d.strap = FailFirstDrain
+        asyncio.run(run_for(d, 0.25))
+        self.assertGreaterEqual(len(FakeStrap.made), 2)     # first link dropped on drain error, reconnected
+
+    def test_corrupt_housekeeping_timestamp_does_not_disable_job(self):
+        c = db.connect()
+        db.set_state(c, "daemon_last_ping", "not-a-float")
+        c.close()
+        ran = []
+        d = make(do_drain=False)
+        d.jobs = [("ping", 3600, lambda: ran.append(1) or True)]
+        asyncio.run(run_for(d, 0.2))
+        self.assertEqual(ran, [1])
+
+
 if __name__ == "__main__":
     unittest.main()

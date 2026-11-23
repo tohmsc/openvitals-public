@@ -270,8 +270,11 @@ class Daemon:
         stopper = asyncio.ensure_future(self.stop.wait())
         await asyncio.wait({task, stopper}, return_when=asyncio.FIRST_COMPLETED)
         stopper.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stopper
         if not task.done():
             task.cancel()
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
             return None
         return task.result()
 
@@ -286,14 +289,20 @@ class Daemon:
         n0 = self.frames
         self.last_frame = time.monotonic()
         task = asyncio.ensure_future(w.drain(timeout=self.drain_timeout))
-        quiet = False
+        quiet = cancelled = False
         while not task.done():
             await asyncio.wait({task}, timeout=self.tick)
             self.beat()
             quiet = time.monotonic() - self.last_frame > self.drain_stall
             if quiet or self.stop.is_set() or not w.client.is_connected:
                 task.cancel()
+                cancelled = True
                 break
+        if cancelled:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        else:
+            await task
         self.c.commit()
         if self.frames > n0:
             db.set_state(self.c, "last_ble_sync", time.time())
@@ -336,9 +345,9 @@ class Daemon:
 
             def counted(ch, inner):
                 self.last_frame = time.monotonic()
-                if inner[0] != whoop.T_REALTIME:
-                    self.frames += 1
                 sink(ch, inner)
+                if inner and inner[0] != whoop.T_REALTIME:
+                    self.frames += 1
             w.raw_sink = counted
             w.on_realtime = self.on_realtime
             w.on_battery = self.on_battery
@@ -390,10 +399,11 @@ class Daemon:
                 await self.nap(self.tick, wake_on_drain=True)
             # after a wake the next link must come quickly; otherwise allow idle_restart
             self.reconnect_by = time.monotonic() + (self.wake_grace if asleep else self.idle_restart)
-            try:
-                await self._ble(w.realtime(False))
-            except Exception:
-                pass
+            if not asleep and w.client.is_connected:
+                try:
+                    await self._ble(w.realtime(False))
+                except Exception:
+                    pass
 
     async def nap(self, secs, wake_on_drain=False):
         waits = [asyncio.ensure_future(self.stop.wait())]
@@ -402,6 +412,8 @@ class Daemon:
         await asyncio.wait(waits, timeout=secs, return_when=asyncio.FIRST_COMPLETED)
         for t in waits:
             t.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
 
     # ---------------- housekeeping (no Bluetooth) ----------------
     async def housekeeping(self):
@@ -409,9 +421,15 @@ class Daemon:
             for name, every, fn in self.jobs:
                 key = f"daemon_last_{name}"
                 try:
-                    if time.time() - float(db.get_state(self.c, key, 0)) < every:
+                    try:
+                        last_run = float(db.get_state(self.c, key, 0) or 0)
+                    except ValueError:
+                        last_run = 0.0
+                    if time.time() - last_run < every:
                         continue
                     ok = await asyncio.to_thread(fn)
+                    if self.stop.is_set():
+                        return
                     # a job that failed is tried again in 5 minutes, not a full interval later
                     late = 0 if ok is not False else max(0, every - self.retry_job)
                     db.set_state(self.c, key, time.time() - late)
@@ -472,8 +490,13 @@ class Daemon:
                 await self.nap(wait)
         finally:
             chores.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await chores
             self._close_seg()
             self.mark_offline()
+            if self.c is not None:
+                self.c.close()
+                self.c = None
             try:
                 os.remove(LOCK)
             except OSError:

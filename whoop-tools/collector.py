@@ -76,7 +76,7 @@ def holder_is_daemon():
 def raw_sink_for(c, skip=()):
     """Frame sink that stores every strap frame losslessly in ble_raw."""
     def raw_sink(ch, inner):
-        if inner[0] in skip:
+        if not inner or inner[0] in skip:
             return
         c.execute("INSERT INTO ble_raw(ts,channel,ptype,hex) VALUES(?,?,?,?)",
                   (time.time(), ch[4:8], inner[0], inner.hex()))
@@ -202,47 +202,54 @@ def run_telegram():
 
 async def collect_once(live_secs=20, do_api=True):
     c = db.connect()
-    holder = lock_holder()
-    if holder and holder_is_daemon():
-        print(f"strap is held by daemon.py (pid {holder}) — asking it to drain now")
-        try:
-            os.kill(holder, signal.SIGUSR1)
-            await asyncio.sleep(5)
-        except OSError:
-            pass
-        addr = None
-    elif holder:
-        print(f"live streamer (pid {holder}) holds the strap — skipping BLE this run")
-        addr = None
-    else:
-        addr = env_addr() or await whoop.find()
-    if addr:
-        try:
-            async with whoop.Whoop(addr) as w:
-                print("strap connected:", addr)
-                await w.init(); await asyncio.sleep(1.0)
+    try:
+        holder = lock_holder()
+        if holder and holder_is_daemon():
+            print(f"strap is held by daemon.py (pid {holder}) — asking it to drain now")
+            try:
+                os.kill(holder, signal.SIGUSR1)
+                await asyncio.sleep(5)
+            except OSError:
+                pass
+            addr = None
+        elif holder:
+            print(f"live streamer (pid {holder}) holds the strap — skipping BLE this run")
+            addr = None
+        else:
+            addr = env_addr() or await whoop.find()
+        if addr:
+            try:
+                async with whoop.Whoop(addr) as w:
+                    print("strap connected:", addr)
+                    await w.init(); await asyncio.sleep(1.0)
 
-                def rt(r):
-                    if r["hr"] > 0:    # 0 = off the wrist: not a heart rate
-                        c.execute("INSERT OR REPLACE INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)",
-                                  (time.time(), r["hr"], " ".join(map(str, rr_ms(r)))))
-                w.raw_sink = raw_sink_for(c); w.on_realtime = rt
+                    def rt(r):
+                        try:
+                            if r["hr"] > 0:    # 0 = off the wrist: not a heart rate
+                                c.execute("INSERT OR REPLACE INTO ble_hr(ts,hr,rr_ms) VALUES(?,?,?)",
+                                          (time.time(), r["hr"], " ".join(map(str, rr_ms(r)))))
+                                c.commit()
+                        except Exception as ex:
+                            print("live write error:", ex)
+                    w.raw_sink = raw_sink_for(c); w.on_realtime = rt
 
-                n0 = c.execute("SELECT COUNT(*) n FROM ble_raw").fetchone()["n"]
-                await w.drain(timeout=90); c.commit()
-                n1 = c.execute("SELECT COUNT(*) n FROM ble_raw").fetchone()["n"]
-                print(f"drained {n1-n0} new raw frames")
+                    n0 = c.execute("SELECT COUNT(*) n FROM ble_raw").fetchone()["n"]
+                    await w.drain(timeout=90); c.commit()
+                    n1 = c.execute("SELECT COUNT(*) n FROM ble_raw").fetchone()["n"]
+                    print(f"drained {n1-n0} new raw frames")
 
-                if live_secs > 0:
-                    await w.realtime(True)
-                    await asyncio.sleep(live_secs)
-                    await w.realtime(False)
-                    c.commit()
-                db.set_state(c, "last_ble_sync", time.time())
-        except Exception as ex:
-            print("strap not reachable this run:", ex)
-    elif not holder:
-        print("strap not in range this run")
+                    if live_secs > 0:
+                        await w.realtime(True)
+                        await asyncio.sleep(live_secs)
+                        await w.realtime(False)
+                        c.commit()
+                    db.set_state(c, "last_ble_sync", time.time())
+            except Exception as ex:
+                print("strap not reachable this run:", ex)
+        elif not holder:
+            print("strap not in range this run")
+    finally:
+        c.close()
 
     if do_api:
         run_api()
@@ -255,8 +262,14 @@ async def main():
     args = sys.argv[1:]
     if "--no-api" in args: do_api = False
     if "--loop" in args: loop = True
-    if "--live" in args: live = int(args[args.index("--live")+1])
-    if "--interval" in args: interval = int(args[args.index("--interval")+1])
+    if "--live" in args:
+        i = args.index("--live")
+        if i + 1 >= len(args): sys.exit("--live requires seconds")
+        live = int(args[i + 1])
+    if "--interval" in args:
+        i = args.index("--interval")
+        if i + 1 >= len(args): sys.exit("--interval requires seconds")
+        interval = int(args[i + 1])
     while True:
         print("=== collect", time.strftime("%Y-%m-%d %H:%M:%S"), "===")
         await collect_once(live, do_api)

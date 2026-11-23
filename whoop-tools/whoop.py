@@ -139,6 +139,8 @@ def parse_historical(inner: bytes):
     Not fields: d48 (the top byte of a float at d45, NOT skin contact), d73-76 (constant).
     Other versions only get seq/ts; their layout differs (25 = a 24 Hz optical burst).
     """
+    if len(inner) < 3:
+        return {"ver": inner[1] if len(inner) > 1 else None, "raw": inner.hex()}
     d = inner[3:]
     if len(d) < 24:
         return {"ver": inner[1], "raw": d.hex()}
@@ -229,6 +231,8 @@ def parse_metadata(inner: bytes):
     The block's first u32 is the trim cursor; the second (constant 22 on this strap so far)
     is write-wrap state. The block goes back to the strap exactly as received.
     """
+    if len(inner) < 3:
+        return {"subtype": None, "trim": None, "ack": None}
     sub = inner[2]
     d = inner[3:]
     trim = struct.unpack_from("<I", d, 10)[0] if len(d) >= 14 else None
@@ -250,6 +254,7 @@ class Whoop:
         self._hist_done = asyncio.Event()
         self.on_event = None          # optional: called with (event id, inner) for every EVENT
         self._waiting = {}            # opcode -> Future for that command's next response
+        self._tasks = set()           # background tasks (history ACKs) kept referenced until done
 
     async def __aenter__(self):
         try:
@@ -295,7 +300,9 @@ class Whoop:
             if self.on_meta:
                 self.on_meta(m)
             if m["subtype"] == 2 and m["trim"] is not None:   # HISTORY_END -> ACK
-                asyncio.create_task(self._ack(m["trim"], m["ack"]))
+                t = asyncio.create_task(self._ack(m["trim"], m["ack"]))
+                self._tasks.add(t)
+                t.add_done_callback(self._done_task)
             if m["subtype"] == 3:                              # COMPLETE
                 self._hist_done.set()
         elif t == T_CMD_RESP:
@@ -363,6 +370,13 @@ class Whoop:
     async def run_alarm(self):
         """Ring the alarm now (the strap's full alarm buzz, until stopped or it times out)."""
         return await self.request(C_RUN_ALARM, b"\x01")
+
+    def _done_task(self, t):
+        self._tasks.discard(t)
+        if not t.cancelled():
+            ex = t.exception()
+            if ex is not None:
+                print(f"  (history ACK failed: {ex})")
 
     async def _ack(self, trim, block=None):
         # Echo the strap's own 8-byte block (trim cursor + wrap state). Rebuilding it as
@@ -435,29 +449,28 @@ async def cli():
         elif mode == "live":
             secs = float(sys.argv[3]) if len(sys.argv) > 3 else 60
             stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            f = open(os.path.join(HERE, f"live_{stamp}.csv"), "w", newline="")
-            wr = csv.writer(f); wr.writerow(["iso", "hr", "rr_ms"])
-            def rt(r):
-                rr = [x for x in r["rr_ms"] if x]
-                wr.writerow([dt.datetime.now().isoformat(), r["hr"], " ".join(map(str, rr))]); f.flush()
-                print(f"HR {r['hr']:3d}  RR {rr}")
-            w.on_realtime = rt
-            await w.realtime(True)
-            await asyncio.sleep(secs)
-            await w.realtime(False)
-            f.close(); print(f"saved live_{stamp}.csv")
+            with open(os.path.join(HERE, f"live_{stamp}.csv"), "w", newline="") as f:
+                wr = csv.writer(f); wr.writerow(["iso", "hr", "rr_ms"])
+                def rt(r):
+                    rr = [x for x in r["rr_ms"] if x]
+                    wr.writerow([dt.datetime.now().isoformat(), r["hr"], " ".join(map(str, rr))]); f.flush()
+                    print(f"HR {r['hr']:3d}  RR {rr}")
+                w.on_realtime = rt
+                await w.realtime(True)
+                await asyncio.sleep(secs)
+                await w.realtime(False)
+            print(f"saved live_{stamp}.csv")
 
         elif mode == "drain":
             stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            raw = open(os.path.join(HERE, f"history_{stamp}.ndjson"), "w")
-            n = [0]
-            def sink(ch, inner):
-                raw.write(json.dumps({"ch": ch[4:8], "type": inner[0], "hex": inner.hex()}) + "\n")
-                raw.flush(); n[0] += 1
-            def meta(m): print(f"  META subtype={m['subtype']} trim={m['trim']}")
-            w.raw_sink = sink; w.on_meta = meta
-            await w.drain(timeout=120)
-            raw.close()
+            with open(os.path.join(HERE, f"history_{stamp}.ndjson"), "w") as raw:
+                n = [0]
+                def sink(ch, inner):
+                    raw.write(json.dumps({"ch": ch[4:8], "type": inner[0], "hex": inner.hex()}) + "\n")
+                    raw.flush(); n[0] += 1
+                def meta(m): print(f"  META subtype={m['subtype']} trim={m['trim']}")
+                w.raw_sink = sink; w.on_meta = meta
+                await w.drain(timeout=120)
             print(f"captured {n[0]} raw frames -> history_{stamp}.ndjson")
 
 
