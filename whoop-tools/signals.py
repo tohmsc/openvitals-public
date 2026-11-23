@@ -18,7 +18,7 @@ the usual needs BASELINE_MIN earlier nights (from the last BASELINE_NIGHTS), els
 
     python signals.py      # recompute recent nights and print them
 """
-import statistics, time
+import sqlite3, statistics, time
 import db
 
 PER_C = 10            # raw counts per degree C: likely (see above), not calibrated
@@ -37,7 +37,7 @@ def night_temp(c, onset, wake):
     try:
         rows = c.execute("SELECT temp_sum, temp_n FROM strap_min WHERE minute >= ? AND minute < ? AND temp_n >= ?",
                          (onset, wake, MIN_IN_MINUTE)).fetchall()
-    except Exception:                    # decode.py has not created strap_min yet
+    except sqlite3.OperationalError:     # decode.py has not created strap_min yet
         return None, 0
     if len(rows) < MIN_MINUTES:
         return None, len(rows)

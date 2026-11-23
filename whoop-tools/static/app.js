@@ -1029,9 +1029,9 @@
     for (const k of ["rhr", "hrv", "avgHr"]) if (B[k]) B[k].own = B.own;
     VS.today = T; VS.baseline = B;
     const yr = B.end ? new Date(B.end).getFullYear() : "";
-    const versus = B.own ? `next to your usual from your last ${B.nights} nights` : yr ? `next to your usual from ${yr}` : "straight from your strap";
+    const versus = B.own ? `next to your usual from your last ${B.nights} nights` : yr ? `next to your usual from ${yr}` : "";
     $("#today-meta").textContent = T
-      ? `From the strap since ${dTime.format(T.first)}, ${versus}`
+      ? `From the strap since ${dTime.format(T.first)}${versus ? `, ${versus}` : ""}`
       : `${dToday.format(new Date())} · no strap data yet today`;
     const host = $("#today-summary");
     if (!T) {
