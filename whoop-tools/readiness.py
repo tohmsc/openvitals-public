@@ -79,7 +79,7 @@ def night_signals(c, today, u):
     night = c.execute("SELECT rhr, hrv, n_rr FROM daily_night WHERE date=?", (today,)).fetchone()
     own = u.get("source") == "own" and u.get("nights", 0) >= MIN_BASELINE
     if night and own:
-        if night["hrv"] and u.get("hrv") and (night["n_rr"] is None or night["n_rr"] >= learn.MIN_RR):
+        if night["hrv"] and night["hrv"] > 0 and u.get("hrv") and u["hrv"] > 0 and (night["n_rr"] is None or night["n_rr"] >= learn.MIN_RR):
             z = math.log(night["hrv"] / u["hrv"]) / u["hrv_spread"]
             f = _flag(z)
             sig.append(_signal("hrv", "HRV", round(night["hrv"]), round(u["hrv"]), "ms", f, TEXT["hrv"][f], z=round(z, 2)))
@@ -180,13 +180,17 @@ def evaluate(c, today=None):
     have = (u.get("source") == "own" and u.get("nights", 0) >= MIN_BASELINE) or acwr is not None
     level, headline, summary = synthesize(signals, have)
     return {"date": today, "version": VERSION, "level": level, "headline": headline, "summary": summary,
-            "signals": signals, "acwr": round(acwr, 2) if acwr else None,
+            "signals": signals, "acwr": round(acwr, 2) if acwr is not None else None,
             "baseline_nights": u.get("nights", 0), "needs_nights": MIN_BASELINE,
             "alerts": [a.get("key") for a in on]}
 
 
 if __name__ == "__main__":
-    r = evaluate(db.connect(), sys.argv[1] if len(sys.argv) > 1 else None)
+    c = db.connect()
+    try:
+        r = evaluate(c, sys.argv[1] if len(sys.argv) > 1 else None)
+    finally:
+        c.close()
     print(f"{r['date']}  {r['headline']}: {r['summary']}")
     for s in r["signals"]:
         print(f"  {s['flag']:>7}  {s['label']}: {s['value']} {s['unit']} (usual {s['usual']}) - {s['detail']}")

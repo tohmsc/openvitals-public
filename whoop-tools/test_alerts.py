@@ -200,5 +200,9 @@ class AlertsTest(unittest.TestCase):
         send()
         self.assertEqual(len(health()), 2)                           # a new episode is a new message
 
+    def test_sleep_clean_handles_missing_onset(self):
+        self.assertFalse(alerts._sleep_clean(self.c, {
+            "status": "done", "asleep_s": 7 * 3600, "onset": None, "wake": 100000}))
+
 if __name__ == "__main__":
     unittest.main()

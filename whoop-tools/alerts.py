@@ -134,7 +134,8 @@ def hrv_low(c, today):
 
 def _sleep_clean(c, r):
     h = (r["asleep_s"] or 0) / 3600
-    if r["status"] != "done" or not SLEEP_H[0] <= h <= SLEEP_H[1] or not r["wake"] or r["wake"] <= r["onset"]:
+    if (r["status"] != "done" or not SLEEP_H[0] <= h <= SLEEP_H[1]
+            or not r["onset"] or not r["wake"] or r["wake"] <= r["onset"]):
         return False
     n = c.execute("SELECT COUNT(*) n FROM ble_hr WHERE ts >= ? AND ts < ? AND hr > 0",
                   (r["onset"], r["wake"])).fetchone()["n"]
@@ -244,7 +245,10 @@ def message(a):
 
 if __name__ == "__main__":
     c = db.connect()
-    on = active(c)
+    try:
+        on = active(c)
+    finally:
+        c.close()
     if not on:
         print("No alerts. (Each needs 3 clean nights in a row past its line.)")
     for a in on:

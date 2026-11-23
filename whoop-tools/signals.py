@@ -34,8 +34,11 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS skin_night (
 
 def night_temp(c, onset, wake):
     """(mean raw skin temperature, worn minutes) between onset and wake; (None, minutes) if too few."""
-    rows = c.execute("SELECT temp_sum, temp_n FROM strap_min WHERE minute >= ? AND minute < ? AND temp_n >= ?",
-                     (onset, wake, MIN_IN_MINUTE)).fetchall()
+    try:
+        rows = c.execute("SELECT temp_sum, temp_n FROM strap_min WHERE minute >= ? AND minute < ? AND temp_n >= ?",
+                         (onset, wake, MIN_IN_MINUTE)).fetchall()
+    except Exception:                    # decode.py has not created strap_min yet
+        return None, 0
     if len(rows) < MIN_MINUTES:
         return None, len(rows)
     return statistics.fmean(r["temp_sum"] / r["temp_n"] for r in rows), len(rows)
@@ -45,36 +48,38 @@ def update(c=None, days=14):
     """Recompute skin_night for the finished nights of the last `days` days. Returns the rows."""
     own = c is None
     c = c or db.connect()
-    c.execute(SCHEMA)
     try:
-        nights = c.execute("SELECT date, onset, wake FROM sleep_night WHERE status='done' AND onset IS NOT NULL "
-                           "AND wake IS NOT NULL AND date >= date('now', ?) ORDER BY date",
-                           (f"-{int(days)} days",)).fetchall()
-    except Exception:                    # sleep.py has not run on this database yet
-        nights = []
-    out = []
-    for n in nights:
-        temp, minutes = night_temp(c, n["onset"], n["wake"])
-        before = [r["temp_raw"] for r in c.execute(
-            "SELECT temp_raw FROM skin_night WHERE date < ? AND temp_raw IS NOT NULL ORDER BY date DESC LIMIT ?",
-            (n["date"], BASELINE_NIGHTS))]
-        usual = statistics.median(before) if len(before) >= BASELINE_MIN else None
-        if temp is None:
-            status, dev = "too little", None
-        elif usual is None:
-            status, dev = "learning", None
-        else:
-            status, dev = "ok", temp - usual
-        row = {"date": n["date"], "temp_raw": temp, "minutes": minutes, "usual_raw": usual, "nights": len(before),
-               "dev_raw": dev, "dev_c": None if dev is None else dev / PER_C, "status": status,
-               "computed_at": time.time()}
-        c.execute(f"INSERT OR REPLACE INTO skin_night({','.join(row)}) VALUES({','.join('?' * len(row))})",
-                  list(row.values()))
-        out.append(row)
-    c.commit()
-    if own:
-        c.close()
-    return out
+        c.execute(SCHEMA)
+        try:
+            nights = c.execute("SELECT date, onset, wake FROM sleep_night WHERE status='done' AND onset IS NOT NULL "
+                               "AND wake IS NOT NULL AND date >= date('now', ?) ORDER BY date",
+                               (f"-{int(days)} days",)).fetchall()
+        except Exception:                    # sleep.py has not run on this database yet
+            nights = []
+        out = []
+        for n in nights:
+            temp, minutes = night_temp(c, n["onset"], n["wake"])
+            before = [r["temp_raw"] for r in c.execute(
+                "SELECT temp_raw FROM skin_night WHERE date < ? AND temp_raw IS NOT NULL ORDER BY date DESC LIMIT ?",
+                (n["date"], BASELINE_NIGHTS))]
+            usual = statistics.median(before) if len(before) >= BASELINE_MIN else None
+            if temp is None:
+                status, dev = "too little", None
+            elif usual is None:
+                status, dev = "learning", None
+            else:
+                status, dev = "ok", temp - usual
+            row = {"date": n["date"], "temp_raw": temp, "minutes": minutes, "usual_raw": usual, "nights": len(before),
+                   "dev_raw": dev, "dev_c": None if dev is None else dev / PER_C, "status": status,
+                   "computed_at": time.time()}
+            c.execute(f"INSERT OR REPLACE INTO skin_night({','.join(row)}) VALUES({','.join('?' * len(row))})",
+                      list(row.values()))
+            out.append(row)
+        c.commit()
+        return out
+    finally:
+        if own:
+            c.close()
 
 
 def recent(c, limit=30):

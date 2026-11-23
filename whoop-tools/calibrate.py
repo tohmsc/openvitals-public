@@ -84,8 +84,11 @@ def lm(res, p0, iters=500):
             d = solve(M, [-v for v in g])
             if d is not None:
                 pn = [a + b for a, b in zip(p, d)]
-                rn = res(pn)
-                cn = sum(v * v for v in rn)
+                try:
+                    rn = res(pn)
+                    cn = sum(v * v for v in rn)
+                except (OverflowError, ValueError, ZeroDivisionError):
+                    cn = float("inf")
                 if cn < cost:
                     break
             lam *= 10
@@ -152,7 +155,7 @@ def fit_strain(c, generic):
     if len(W) < MIN_ROWS:
         out["skip"] = f"only {len(W)} workouts with WHOOP zone times (needs {MIN_ROWS})"
         return out
-    n, cut = len(W), int(len(W) * SPLIT)
+    cut = int(len(W) * SPLIT)
     p0 = [0, 4, -1, 1, 1, 1, 1]
     fit = lambda rows: lm(lambda p: [_curve(p, sum(a * b for a, b in zip(_weights(p), x))) - s for x, s in rows], p0)
     pt = fit(W[:cut])
@@ -162,7 +165,6 @@ def fit_strain(c, generic):
     out["workouts_tested"] = len(test)
     pa = fit(W)
     out["params"] = _as_model(pa)
-    k = out["params"]["weights"]
 
     # whole days: the share of minutes under zone 1 that counts as zone 0, by the day's average HR
     allw = [(_t(w["start"]), [(json.loads(w["zone_raw"]).get(z) or 0) / 6e4 for z in ZN])
@@ -274,7 +276,7 @@ def _hours(base, carry, R, bases=None):
     """Sleep performance as hours against need, with last night's shortfall carried over."""
     out, debt = [], 0.0
     for i, x in enumerate(R):
-        need = (bases[i] if bases else base) + scores.need_from_strain(x["strain"]) + debt - x["nap"]
+        need = max(0.1, (bases[i] if bases else base) + scores.need_from_strain(x["strain"]) + debt - x["nap"])
         out.append(min(100.0, 100 * x["asleep"] / need))
         debt = carry * max(0.0, need - x["asleep"])
     return out
@@ -326,23 +328,24 @@ def fit_sleep(c, generic):
         ct = int(len(idx) * SPLIT)
         tr, te = idx[:ct], idx[ct:]
         w = lstsq([X[i] for i in tr], [yp[i] for i in tr])
-        out["blend_mae"] = mae([sum(a * b for a, b in zip(w, X[i])) for i in te], [yp[i] for i in te])
-        out["generic_blend_mae"] = mae([gp[i] for i in te], [yp[i] for i in te])
-        out["blend_tested"] = len(te)
         wa = lstsq([X[i] for i in idx], [yp[i] for i in idx])
         ie = [i for i, x in enumerate(post) if x["eff"] is not None]
         X2 = {i: [hp[i], post[i]["eff"], 1.0] for i in ie}
         c2 = int(len(ie) * SPLIT)
         w2t = lstsq([X2[i] for i in ie[:c2]], [yp[i] for i in ie[:c2]])
-        out["no_consistency_mae"] = mae([sum(a * b for a, b in zip(w2t, X2[i])) for i in ie[c2:]], [yp[i] for i in ie[c2:]])
         w2 = lstsq([X2[i] for i in ie], [yp[i] for i in ie])
-        params["blend"] = [round(v, 3) for v in wa]
-        params["blend_no_consistency"] = [round(v, 3) for v in w2]
-        out["error"], out["generic_error"], out["error_on"] = out["blend_mae"], out["generic_blend_mae"], "WHOOP's blend (since May 2025)"
-        sc = fit_consistency(c)
-        if sc:
-            params["consistency_scale"] = sc["scale"]
-            out.update(consistency_mae=sc["mae"], generic_consistency_mae=sc["raw_mae"], consistency_nights=sc["n"])
+        if w is not None and wa is not None and w2t is not None and w2 is not None:
+            out["blend_mae"] = mae([sum(a * b for a, b in zip(w, X[i])) for i in te], [yp[i] for i in te])
+            out["generic_blend_mae"] = mae([gp[i] for i in te], [yp[i] for i in te])
+            out["blend_tested"] = len(te)
+            out["no_consistency_mae"] = mae([sum(a * b for a, b in zip(w2t, X2[i])) for i in ie[c2:]], [yp[i] for i in ie[c2:]])
+            params["blend"] = [round(v, 3) for v in wa]
+            params["blend_no_consistency"] = [round(v, 3) for v in w2]
+            out["error"], out["generic_error"], out["error_on"] = out["blend_mae"], out["generic_blend_mae"], "WHOOP's blend (since May 2025)"
+            sc = fit_consistency(c)
+            if sc:
+                params["consistency_scale"] = sc["scale"]
+                out.update(consistency_mae=sc["mae"], generic_consistency_mae=sc["raw_mae"], consistency_nights=sc["n"])
     out["params"] = params
     return out
 
@@ -362,7 +365,10 @@ def fit_consistency(c):
         pts.append((100 * same, r["sleep_consistency"]))
     if len(pts) < MIN_ROWS:
         return None
-    a, b = lstsq([[v, 1.0] for v, _ in pts], [w for _, w in pts])
+    ab = lstsq([[v, 1.0] for v, _ in pts], [w for _, w in pts])
+    if ab is None:
+        return None
+    a, b = ab
     return {"scale": [round(a, 3), round(b, 3)], "n": len(pts),
             "mae": mae([a * v + b for v, _ in pts], [w for _, w in pts]), "raw_mae": mae([v for v, _ in pts], [w for _, w in pts])}
 
@@ -407,13 +413,17 @@ def fit_recovery(c, generic):
     clip = lambda v: min(99.0, max(1.0, v))
     res = {}
     for name, cols in (("with_sleep", (1, 2, 3)), ("without_sleep", (1, 2))):
-        X = lambda f: [1.0] + [f[k] for k in cols]
+        X = lambda f, cols=cols: [1.0] + [f[k] for k in cols]
         w = lstsq([X(f) for f in F[:cut]], [f[0] for f in F[:cut]])
+        wa = lstsq([X(f) for f in F], [f[0] for f in F])
+        if w is None or wa is None:
+            out["skip"] = "recovery features are degenerate (singular matrix)"
+            return out
         pred = [clip(sum(a * b for a, b in zip(w, X(f)))) for f in test]
         gpred = [clip(sum(a * b for a, b in zip(generic[name], X(f)))) for f in test]
         res[name] = (mae(pred, y), mean(_zone(a) == _zone(b) for a, b in zip(pred, y)),
                      mae(gpred, y), mean(_zone(a) == _zone(b) for a, b in zip(gpred, y)),
-                     [round(v, 3) for v in lstsq([X(f) for f in F], [f[0] for f in F])])
+                     [round(v, 3) for v in wa])
     out.update(mae=res["with_sleep"][0], zone_match=res["with_sleep"][1],
                generic_mae=res["with_sleep"][2], generic_zone_match=res["with_sleep"][3],
                mae_without_sleep=res["without_sleep"][0], zone_match_without_sleep=res["without_sleep"][1],

@@ -68,16 +68,23 @@ def _runs(states):
     return out
 
 
+def _has(c, table):
+    return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+
+
 def minutes(c, a, b):
     """Per-minute (movement, heart rate) for [a, b), as two lists; None where nothing was read."""
-    n = int((b - a) // 60)
+    n = max(0, int((b - a) // 60))
     move, hr = [None] * n, [[] for _ in range(n)]
-    for r in c.execute("SELECT minute, move_sum, n FROM motion_min WHERE minute >= ? AND minute < ?", (a, b)):
-        i = int((r["minute"] - a) // 60)
-        if 0 <= i < n and r["n"] >= 20:              # a third of the minute read, at least
-            move[i] = r["move_sum"] / r["n"]
+    if _has(c, "motion_min"):
+        for r in c.execute("SELECT minute, move_sum, n FROM motion_min WHERE minute >= ? AND minute < ?", (a, b)):
+            i = int((r["minute"] - a) // 60)
+            if 0 <= i < n and r["n"] >= 20:              # a third of the minute read, at least
+                move[i] = r["move_sum"] / r["n"]
     for r in c.execute("SELECT ts, hr FROM ble_hr WHERE ts >= ? AND ts < ? AND hr > 0", (a, b)):
-        hr[int((r["ts"] - a) // 60)].append(r["hr"])
+        i = int((r["ts"] - a) // 60)
+        if 0 <= i < n:
+            hr[i].append(r["hr"])
     return move, [statistics.median(h) if len(h) >= 10 else None for h in hr]
 
 
@@ -214,26 +221,31 @@ def night(c, morning, now=None):
 
 def update(c=None, now=None):
     """Recompute the nights that can still change (yesterday, today, and tonight once it starts)."""
+    own = c is None
     c = c or db.connect()
-    c.execute(SCHEMA)
-    now = now or time.time()
-    today = metrics.day_bounds(0, now)[0]
-    out = []
-    for morning in (today - 86400, today, today + 86400):
-        if morning + EVENING * 3600 > now:
-            continue
-        n = night(c, morning, now)
-        if not n:
-            continue
-        old = c.execute("SELECT status FROM sleep_night WHERE date=?", (n["date"],)).fetchone()
-        if old and old["status"] == "done" and n["status"] != "done":
-            continue
-        n["computed_at"] = time.time()
-        c.execute(f"INSERT OR REPLACE INTO sleep_night({COLS}) VALUES({','.join('?' * len(COLS.split(',')))})",
-                  [n[k] for k in COLS.split(",")])
-        out.append(n)
-    c.commit()
-    return out
+    try:
+        c.execute(SCHEMA)
+        now = now or time.time()
+        out = []
+        for offset in (-1, 0, 1):
+            morning = metrics.day_bounds(offset, now)[0]
+            if morning + EVENING * 3600 > now:
+                continue
+            n = night(c, morning, now)
+            if not n:
+                continue
+            old = c.execute("SELECT status FROM sleep_night WHERE date=?", (n["date"],)).fetchone()
+            if old and old["status"] == "done" and n["status"] != "done":
+                continue
+            n["computed_at"] = time.time()
+            c.execute(f"INSERT OR REPLACE INTO sleep_night({COLS}) VALUES({','.join('?' * len(COLS.split(',')))})",
+                      [n[k] for k in COLS.split(",")])
+            out.append(n)
+        c.commit()
+        return out
+    finally:
+        if own:
+            c.close()
 
 
 def recent(c, limit=30):

@@ -80,6 +80,12 @@ class ReadinessTest(unittest.TestCase):
         resp = next(s for s in readiness.evaluate(self.c, TODAY)["signals"] if s["key"] == "resp")
         self.assertEqual(resp["flag"], "bad")
 
+    def test_zero_acute_load_reports_zero_acwr_not_none(self):
+        self.night(46, 60)
+        self.strain([0.0] * 7 + [10.0] * 21)
+        r = readiness.evaluate(self.c, TODAY)
+        self.assertEqual(r["acwr"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

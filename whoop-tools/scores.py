@@ -402,7 +402,12 @@ HR_CEILING = 230        # beats above this are a bad optical reading, not a hear
 def seen_max_hr(c):
     """Highest heart rate the strap has recorded for 10 s in a row (the lowest beat of the best
     run). Scans only rows added since the last call (kept in sync_state)."""
-    st = json.loads(db.get_state(c, "scores_max_seen") or "{}")
+    try:
+        st = json.loads(db.get_state(c, "scores_max_seen") or "{}")
+    except ValueError:
+        st = {}
+    if not isinstance(st, dict):
+        st = {}
     since, best = st.get("ts", 0.0), st.get("hr")
     run, prev, last = [], None, since
     for r in c.execute("SELECT ts, hr FROM ble_hr WHERE ts > ? AND hr > 0 ORDER BY ts", (since - SUSTAINED_S,)):
@@ -471,10 +476,11 @@ def heart_zones(c, a, b, rest, top):
                      (a, b)).fetchall()
     mins, rec, tot, hi, prev = [0.0] * 6, 0.0, 0.0, 0, None
     run = []                                   # for "sustained": 10 s in a row at or over max
+    span = max(1.0, top - rest)
     for r in rows:
         dt = min(r["ts"] - prev, 1.0) if prev is not None and r["ts"] - prev < 60 else 1.0
         prev = r["ts"]
-        v = (r["hr"] - rest) / (top - rest)
+        v = (r["hr"] - rest) / span
         z = 0 if v < 0.5 else min(5, int((v - 0.5) * 10) + 1)
         mins[z] += dt / 60
         rec += dt
@@ -560,13 +566,17 @@ def sleep(c, date, prev_strain, prev_sleep, m):
     if not n:
         return None
     in_bed = n["wake"] - n["onset"]
+    if in_bed <= 0:
+        return None
     asleep_h = (n["asleep_s"] or 0) / 3600
     debt = prev_sleep["inputs"]["shortfall_h"] * m["debt_carry"] if prev_sleep else 0.0
     naps = 0.0                                 # sleep.py finds the main night only
     s_need = need_from_strain(prev_strain if prev_strain is not None else 10.0)
     need = m["baseline_h"] + s_need + debt - naps
+    if need <= 0:
+        return None
     hours_pct = min(100.0, 100 * asleep_h / need)
-    eff = 100 * (n["asleep_s"] or 0) / in_bed if in_bed > 0 else None
+    eff = 100 * (n["asleep_s"] or 0) / in_bed
     cons = consistency(c, date, m)
     if m.get("blend") is None:                 # hours against need only (generic-v1)
         perf = hours_pct
@@ -622,7 +632,7 @@ def recovery(c, date, sleep_est, m):
     elif not night.get("rmssd") or night.get("n_rr", 0) < GATES["min_rr"]:
         ok, why = False, f"only {night.get('n_rr', 0)} clean beat pairs overnight (needs {GATES['min_rr']})"
     value, basis = None, None
-    if u.get("rhr") and night.get("rmssd") and u.get("hrv"):
+    if u.get("rhr") and night.get("rmssd") and night["rmssd"] > 0 and u.get("hrv") and u["hrv"] > 0:
         zr = (night["resting"] - u["rhr"]) / u.get("rhr_spread", learn.RHR_SPREAD[1])
         zh = math.log(night["rmssd"] / u["hrv"]) / u.get("hrv_spread", learn.HRV_SPREAD[1])
         if sleep_est and sleep_est["ok"]:
@@ -669,37 +679,42 @@ def first_day(c):
 def update(c=None, days=7, version=None, now=None, only=None):
     """(Re)compute the last `days` days (oldest first: sleep needs the day before's strain and
     shortfall) with `version` (default: this install's current()). Returns {date: {kind: estimate}}."""
+    own = c is None
     c = c or db.connect()
-    c.execute(SCHEMA)
-    now = now or time.time()
-    version = version or current(c)
-    base = get_model(c, version)
-    if base is None:
-        raise ValueError(f"unknown scores model {version}")
-    today = learn._date(now)
-    start = first_day(c)
-    if not start:
-        return {}
-    dates = [_shift(today, -i) for i in range(days - 1, -1, -1)]
-    dates = [d for d in dates if d >= start and (not only or d == only)]
-    out = {}
-    for d in dates:
-        u = learn.usual(c, d)
-        rest = u.get("rhr") or (u.get("then") or {}).get("rhr") or base["strain"].get("rest_default", 50.0)
-        m = personalise(c, d, base)
-        prev_strain = _get(c, _shift(d, -1), "strain", version)
-        prev_sleep = _get(c, _shift(d, -1), "sleep", version)
-        sl = sleep(c, d, prev_strain["value"] if prev_strain and prev_strain["ok"] else None,
-                   prev_sleep if prev_sleep and prev_sleep["ok"] else None, m["sleep"])
-        rc = recovery(c, d, sl, m["recovery"])
-        st = strain(c, d, rest, m["strain"], now)
-        if st:
-            add_energy(c, d, st, now)
-        for kind, est in (("sleep", sl), ("recovery", rc), ("strain", st)):
-            _put(c, d, kind, version, est)
-        out[d] = {"sleep": sl, "recovery": rc, "strain": st}
-    c.commit()
-    return out
+    try:
+        c.execute(SCHEMA)
+        now = now or time.time()
+        version = version or current(c)
+        base = get_model(c, version)
+        if base is None:
+            raise ValueError(f"unknown scores model {version}")
+        today = learn._date(now)
+        start = first_day(c)
+        if not start:
+            return {}
+        dates = [_shift(today, -i) for i in range(days - 1, -1, -1)]
+        dates = [d for d in dates if d >= start and (not only or d == only)]
+        out = {}
+        for d in dates:
+            u = learn.usual(c, d)
+            rest = u.get("rhr") or (u.get("then") or {}).get("rhr") or base["strain"].get("rest_default", 50.0)
+            m = personalise(c, d, base)
+            prev_strain = _get(c, _shift(d, -1), "strain", version)
+            prev_sleep = _get(c, _shift(d, -1), "sleep", version)
+            sl = sleep(c, d, prev_strain["value"] if prev_strain and prev_strain["ok"] else None,
+                       prev_sleep if prev_sleep and prev_sleep["ok"] else None, m["sleep"])
+            rc = recovery(c, d, sl, m["recovery"])
+            st = strain(c, d, rest, m["strain"], now)
+            if st:
+                add_energy(c, d, st, now)
+            for kind, est in (("sleep", sl), ("recovery", rc), ("strain", st)):
+                _put(c, d, kind, version, est)
+            out[d] = {"sleep": sl, "recovery": rc, "strain": st}
+        c.commit()
+        return out
+    finally:
+        if own:
+            c.close()
 
 
 def for_app(c, version=None, limit=400):
@@ -712,9 +727,12 @@ def for_app(c, version=None, limit=400):
     kind_to = {"recovery": "recovery", "sleep": "sleep", "strain": "cycle"}
     for r in c.execute("SELECT date, kind, row, inputs FROM estimates WHERE version=? AND ok=1 "
                        "ORDER BY date DESC LIMIT ?", (version, limit)):
+        target = kind_to.get(r["kind"])
+        if not target:
+            continue
         row = json.loads(r["row"])
-        row.update(est=version, est_date=r["date"], basis=json.loads(r["inputs"]).get("basis"))
-        out[kind_to[r["kind"]]].append(row)
+        row.update(est=version, est_date=r["date"], basis=(json.loads(r["inputs"] or "{}") or {}).get("basis"))
+        out[target].append(row)
     # the last two weeks' held-back estimates, so the app can say why a day has no score
     out["held"] = [{"date": r["date"], "kind": r["kind"], "why": r["why"]} for r in c.execute(
         "SELECT date, kind, why FROM estimates WHERE version=? AND ok=0 AND date >= ? ORDER BY date DESC",
@@ -730,7 +748,10 @@ def _utc(s):
 def check(c, version=None):
     """Re-run the version's numbers against the WHOOP archive and report the errors (all days,
     in-sample: the held-out figures in MODELS come from fitting on the first 70% only)."""
-    m = get_model(c, version or current(c))
+    ver = version or current(c)
+    m = get_model(c, ver)
+    if m is None:
+        raise ValueError(f"unknown scores model {ver}")
     ZN = ["zone_zero_milli", "zone_one_milli", "zone_two_milli", "zone_three_milli", "zone_four_milli", "zone_five_milli"]
     res = {}
     # strain on workouts (zone minutes from WHOOP, Dec 2024 on, HR-reserve zones)
@@ -738,7 +759,7 @@ def check(c, version=None):
     for w in c.execute("SELECT strain, zone_raw FROM api_workout WHERE zone_raw LIKE '%zone_zero%' AND strain > 0 "
                        "AND start >= '2024-12'"):
         z = json.loads(w["zone_raw"])
-        mins = [z[k] / 6e4 for k in ZN]
+        mins = [(z.get(k) or 0) / 6e4 for k in ZN]
         if sum(mins[1:]) < 5 and w["strain"] > 8:      # logged by hand, no heart rate behind it
             continue
         errs.append(abs(strain_map(sum(a * b for a, b in zip(m["strain"]["weights"], mins)), m["strain"]) - w["strain"]))
@@ -753,7 +774,7 @@ def check(c, version=None):
         if not prev:
             debt = 0.0
             continue
-        asleep = (s["total_in_bed_ms"] - s["total_awake_ms"]) / 3.6e6
+        asleep = (s["total_in_bed_ms"] - (s["total_awake_ms"] or 0)) / 3.6e6
         need = (m["sleep"]["baseline_h"] or m["sleep"]["baseline_default_h"]) + need_from_strain(prev[0]) + debt
         errs.append(abs(min(100, 100 * asleep / need) - s["sleep_perf"]))
         debt = m["sleep"]["debt_carry"] * max(0.0, need - asleep)

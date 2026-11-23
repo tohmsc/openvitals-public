@@ -25,7 +25,7 @@ def parse_rr(v, hr=None):
             continue
         if not RR_MIN < x < RR_MAX:
             continue
-        if hr and abs(x - 60000 / hr) > RR_TOLERANCE * 60000 / hr:
+        if hr and hr > 0 and abs(x - 60000 / hr) > RR_TOLERANCE * 60000 / hr:
             continue
         out.append(x)
     return out
@@ -181,6 +181,8 @@ def breath_spectrum(beats, a, p=RESP):
         # otherwise outweigh breathing) and leaves the breathing rhythm's frequency as it is
         ys = [y1 - y0 for y0, y1 in zip(ys, ys[1:])]
         n = len(ys)
+    if n < 2:
+        return None
     km = (n - 1) / 2.0
     my = sum(ys) / n
     sxx = sum((k - km) ** 2 for k in range(n))
@@ -332,9 +334,10 @@ def battery(c, key="battery_now"):
         now = json.loads(db.get_state(c, key) or "null")
     except ValueError:
         return None
-    if not now or now.get("src") != "strap":   # written by an older decode.py from log lines
+    if not isinstance(now, dict) or now.get("src") != "strap":   # written by an older decode.py from log lines
         return None
-    return now["soc"] if time.time() - now["ts"] < 86400 else None
+    ts = now.get("ts")
+    return now.get("soc") if ts is not None and time.time() - ts < 86400 else None
 
 
 def pack_battery(c):
@@ -346,10 +349,6 @@ def pack_battery(c):
 GAP_S = 60               # seconds without heart rate before it counts as a gap
 HOST_WORDS = {"asleep": "the Mac was asleep", "searching": "the Mac couldn't reach the strap",
               "linked": "the strap was connected", None: "the daemon wasn't running"}
-
-
-def _overlap(a, b, x, y):
-    return max(0.0, min(b, y) - max(a, x))
 
 
 def coverage(c, a, b, now=None, min_gap=GAP_S):

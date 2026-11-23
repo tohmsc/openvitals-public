@@ -227,6 +227,27 @@ class NightTest(unittest.TestCase):
         r = signals.update(self.c)[0]
         self.assertEqual((r["date"], r["minutes"], r["temp_raw"]), (d, 180, 345))
 
+    def test_update_handles_missing_strap_min_table(self):
+        orig = db.DB_PATH
+        try:
+            db.DB_PATH = os.path.join(tempfile.mkdtemp(prefix="whoop-sig-"), "t.db")
+            c = db.connect()
+            try:
+                import sleep
+                c.execute(sleep.SCHEMA)
+                wake = (int(time.time()) // 86400 - 1) * 86400 + 6 * 3600
+                date = time.strftime("%Y-%m-%d", time.gmtime(wake))
+                c.execute("INSERT INTO sleep_night(date,onset,wake,status) VALUES(?,?,?,?)",
+                          (date, wake - 7 * 3600, wake, "done"))
+                c.commit()
+                rows = signals.update(c)
+                self.assertEqual(rows[0]["status"], "too little")
+                self.assertEqual(rows[0]["minutes"], 0)
+            finally:
+                c.close()
+        finally:
+            db.DB_PATH = orig
+
 
 if __name__ == "__main__":
     unittest.main()

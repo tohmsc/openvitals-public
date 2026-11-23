@@ -275,6 +275,20 @@ class Generic(Base):
         self.assertGreater(abs(w), abs(s) + abs(b))
         self.assertTrue(34 <= a <= 99)                                # a usual night isn't red
 
+    def test_degenerate_sleep_and_hr_bounds_do_not_crash(self):
+        import sleep
+        self.c.execute(sleep.SCHEMA)
+        self.c.execute("INSERT OR REPLACE INTO sleep_night(date,onset,wake,asleep_s,awake_s,wakeups,status) "
+                       "VALUES('2026-11-19',1000,1000,0,0,0,'done')")
+        self.c.commit()
+        self.assertIsNone(scores.sleep(self.c, "2026-11-19", 10.0, None, scores.MODELS["v1"]["sleep"]))
+        self.hr(at("2026-11-19", 10), at("2026-11-19", 10.1), 80)
+        z = scores.heart_zones(self.c, at("2026-11-19", 10), at("2026-11-19", 10.1), rest=100, top=100)
+        self.assertGreater(z["recorded_s"], 0)
+        import learn
+        self.assertEqual(learn._clock(22.995), "23:00")
+        self.assertEqual(learn._clock(23.999), "00:00")
+
 
 if __name__ == "__main__":
     unittest.main()
