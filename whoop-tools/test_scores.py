@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for scores.py: the strain curve and zones, the checks that hold an estimate back,
 and that versions sit side by side.   .venv/bin/python -m unittest test_scores"""
-import json, math, os, tempfile, time, unittest
+import json, os, tempfile, time, unittest
 
 _tmp = tempfile.mkdtemp()
 os.environ["WHOOP_DB"] = os.path.join(_tmp, "t.db")
@@ -197,6 +197,15 @@ class Selection(Base):
         self.assertEqual(scores.current(self.c), "fit-test")
         self.assertEqual(scores.get_model(self.c, "fit-test")["recovery"]["with_sleep"][2], 12.0)
 
+    def test_for_app_limit_is_days_of_each_kind(self):
+        for d in range(1, 6):
+            for kind in ("recovery", "sleep", "strain"):
+                self.c.execute("INSERT INTO estimates(date,kind,version,value,ok,row,inputs,computed_at) "
+                               "VALUES(?,?,?,?,1,'{}','{}',0)", (f"2026-01-{d:02d}", kind, "v1", d))
+        out = scores.for_app(self.c, "v1", limit=4)
+        self.assertEqual([len(out[k]) for k in ("recovery", "sleep", "cycle")], [4, 4, 4])
+        self.assertEqual(out["cycle"][0]["est_date"], "2026-01-05")
+
     def test_for_app_follows_the_install(self):
         good = {"value": 12.0, "ok": True, "why": None, "row": {"start": "x", "strain": 12.0}, "inputs": {}}
         scores._put(self.c, "2026-11-10", "strain", "v1", good)
@@ -274,6 +283,20 @@ class Generic(Base):
         a, b, w, s = self.G["recovery"]["with_sleep"]
         self.assertGreater(abs(w), abs(s) + abs(b))
         self.assertTrue(34 <= a <= 99)                                # a usual night isn't red
+
+    def test_degenerate_sleep_and_hr_bounds_do_not_crash(self):
+        import sleep
+        self.c.execute(sleep.SCHEMA)
+        self.c.execute("INSERT OR REPLACE INTO sleep_night(date,onset,wake,asleep_s,awake_s,wakeups,status) "
+                       "VALUES('2026-11-19',1000,1000,0,0,0,'done')")
+        self.c.commit()
+        self.assertIsNone(scores.sleep(self.c, "2026-11-19", 10.0, None, scores.MODELS["v1"]["sleep"]))
+        self.hr(at("2026-11-19", 10), at("2026-11-19", 10.1), 80)
+        z = scores.heart_zones(self.c, at("2026-11-19", 10), at("2026-11-19", 10.1), rest=100, top=100)
+        self.assertGreater(z["recorded_s"], 0)
+        import learn
+        self.assertEqual(learn._clock(22.995), "23:00")
+        self.assertEqual(learn._clock(23.999), "00:00")
 
 
 if __name__ == "__main__":

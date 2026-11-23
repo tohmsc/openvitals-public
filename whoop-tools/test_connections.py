@@ -50,6 +50,28 @@ class D1RetryTest(unittest.TestCase):
             self.d1.q("SELEC 1")
         self.assertEqual(self.d1.s.post.call_count, 1)
 
+    def test_esc_handles_non_finite_floats_and_malformed_json_response(self):
+        self.assertEqual(cloud_sync.esc(float("nan")), "NULL")
+        self.assertEqual(cloud_sync.esc(float("inf")), "NULL")
+        self.assertEqual(cloud_sync.esc(True), "1")
+        bad = Resp(200, ok=True)
+        bad.json = mock.Mock(side_effect=ValueError("truncated"))
+        self.d1.s.post = mock.Mock(return_value=bad)
+        self.assertIsNone(self.d1.q("SELECT 1", ok_fail=True))
+
+
+class WhoopApiRetryTest(unittest.TestCase):
+    def test_429_retry_is_bounded(self):
+        import whoop_api
+        r429 = mock.Mock(status_code=429, headers={"Retry-After": "1"})
+        r429.raise_for_status.side_effect = requests.HTTPError("429")
+        with mock.patch.object(whoop_api, "access_token", return_value="tok"), \
+             mock.patch.object(whoop_api.requests, "get", return_value=r429) as mget, \
+             mock.patch.object(whoop_api.time, "sleep"):
+            with self.assertRaises(requests.HTTPError):
+                whoop_api.get("/v2/cycle", tries=3)
+        self.assertEqual(mget.call_count, 3)
+
 
 class TelegramErrorTest(unittest.TestCase):
     def test_token_is_not_in_the_error(self):

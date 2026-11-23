@@ -132,12 +132,15 @@ def windows(c, date, now=None):
     n = int((b - a) // WINDOW)
     rows = [[] for _ in range(n)]
     for r in c.execute("SELECT ts, hr, rr_ms FROM ble_hr WHERE ts >= ? AND ts < ? AND hr > 0 ORDER BY ts", (a, b)):
-        rows[int((r["ts"] - a) // WINDOW)].append(r)
+        i = int((r["ts"] - a) // WINDOW)
+        if 0 <= i < n:
+            rows[i].append(r)
     move = [[] for _ in range(n)]
     if _has(c, "motion_min"):
         for r in c.execute("SELECT minute, move_sum, n FROM motion_min WHERE minute >= ? AND minute < ?", (a, b)):
-            if r["n"] >= 20:
-                move[int((r["minute"] - a) // WINDOW)].append(r["move_sum"] / r["n"])
+            i = int((r["minute"] - a) // WINDOW)
+            if 0 <= i < n and r["n"] >= 20:
+                move[i].append(r["move_sum"] / r["n"])
     spans = _sleep_spans(c, a, b)
     rest, top = zones(c, date)
     active_hr = rest + ACTIVE_HRR * (top - rest)
@@ -193,7 +196,8 @@ def _night(c, date):
         if _has(c, table):
             r = c.execute(f"SELECT rhr, hrv FROM {table} WHERE date <= ? AND rhr IS NOT NULL AND hrv IS NOT NULL "
                           "ORDER BY date DESC LIMIT 1", (date,)).fetchone()
-            if r and metrics.RHR_PLAUSIBLE[0] <= r["rhr"] <= metrics.RHR_PLAUSIBLE[1]:
+            if (r and metrics.RHR_PLAUSIBLE[0] <= r["rhr"] <= metrics.RHR_PLAUSIBLE[1]
+                    and metrics.HRV_PLAUSIBLE[0] <= r["hrv"] <= metrics.HRV_PLAUSIBLE[1]):
                 return r["rhr"], r["hrv"]
     return None
 
@@ -203,11 +207,11 @@ def baseline(c, date, now=None):
     calm, days = [], set()
     for k in range(1, BASE_DAYS + 1):
         d = _shift(date, -k)
-        a = _midnight(d)
-        if not c.execute("SELECT 1 FROM ble_hr WHERE ts >= ? AND ts < ? LIMIT 1", (a, a + 86400)).fetchone():
+        a, b_end = _midnight(d), _midnight(_shift(d, 1))
+        if not c.execute("SELECT 1 FROM ble_hr WHERE ts >= ? AND ts < ? LIMIT 1", (a, b_end)).fetchone():
             continue
-        ws = _stored(c, d, now) or windows(c, d, now=_midnight(_shift(d, 1)))
-        ok = [w for w in ws if w["state"] == "ok"]
+        ws = _stored(c, d, now) or windows(c, d, now=b_end)
+        ok = [w for w in ws if w["state"] == "ok" and w["hr"] is not None and w["rmssd"] and w["rmssd"] > 0]
         calm += ok
         if ok:
             days.add(d)
@@ -244,7 +248,9 @@ def baseline_text(b):
 
 def score(w, b):
     """0-3 for a window in state ok, else None."""
-    if w["state"] != "ok" or not w["rmssd"]:
+    if w["state"] != "ok" or not w["rmssd"] or w["rmssd"] <= 0 or not b.get("rmssd") or b["rmssd"] <= 0:
+        return None
+    if not b.get("hr_sd") or not b.get("ln_sd"):
         return None
     zhr = (w["hr"] - b["hr"]) / b["hr_sd"]
     zhrv = (math.log(b["rmssd"]) - math.log(w["rmssd"])) / b["ln_sd"]
@@ -308,37 +314,42 @@ def for_app(c, now=None):
 
 def update(c=None, now=None):
     """Store today's and yesterday's windows (the daemon runs this every few minutes)."""
+    own = c is None
     c = c or db.connect()
-    c.execute(SCHEMA)
-    now = now or time.time()
-    today = learn._date(now)
-    out = {}
-    cols = ','.join('?' * len(COLS.split(',')))
-    # older days the baseline reads, stored once (unscored: only their calm windows are used)
-    for k in range(2, BASE_DAYS + 2):
-        d = _shift(today, -k)
-        a = _midnight(d)
-        if c.execute("SELECT 1 FROM stress WHERE date=? LIMIT 1", (d,)).fetchone() or not c.execute(
-                "SELECT 1 FROM ble_hr WHERE ts >= ? AND ts < ? LIMIT 1", (a, a + 86400)).fetchone():
-            continue
-        c.executemany(f"INSERT OR REPLACE INTO stress({COLS}) VALUES({cols})",
-                      [(w["ts"], d, w["state"], None, w["hr"], w["rmssd"], w["n_rr"], w["move"], time.time())
-                       for w in windows(c, d, now=_midnight(_shift(d, 1)))])
-    for date in (_shift(today, -1), today):
-        b = baseline(c, date, now) if date != today else cached_baseline(c, date, now)
-        d = day(c, date, now, base=b)
-        have = {r["ts"]: (r["state"], r["score"], r["hr"], r["rmssd"]) for r in c.execute(
-            "SELECT ts, state, score, hr, rmssd FROM stress WHERE date=?", (date,))}
-        stamp = time.time()
-        # only rows that changed get a new computed_at, so cloud_sync pushes just those
-        c.executemany(f"INSERT OR REPLACE INTO stress({COLS}) VALUES({cols})",
-                      [(w["ts"], date, w["state"], w["score"], w["hr"], w["rmssd"], w["n_rr"], w["move"], stamp)
-                       for w in d["series"]
-                       if have.get(w["ts"]) != (w["state"], w["score"], w["hr"], w["rmssd"])])
-        out[date] = d
-    c.commit()
-    db.set_state(c, "stress_now", json.dumps(out[today]["now"]))
-    return out
+    try:
+        c.execute(SCHEMA)
+        now = now or time.time()
+        today = learn._date(now)
+        out = {}
+        cols = ','.join('?' * len(COLS.split(',')))
+        # older days the baseline reads, stored once (unscored: only their calm windows are used)
+        for k in range(2, BASE_DAYS + 2):
+            d = _shift(today, -k)
+            a, b_end = _midnight(d), _midnight(_shift(d, 1))
+            if c.execute("SELECT 1 FROM stress WHERE date=? LIMIT 1", (d,)).fetchone() or not c.execute(
+                    "SELECT 1 FROM ble_hr WHERE ts >= ? AND ts < ? LIMIT 1", (a, b_end)).fetchone():
+                continue
+            c.executemany(f"INSERT OR REPLACE INTO stress({COLS}) VALUES({cols})",
+                          [(w["ts"], d, w["state"], None, w["hr"], w["rmssd"], w["n_rr"], w["move"], time.time())
+                           for w in windows(c, d, now=b_end)])
+        for date in (_shift(today, -1), today):
+            b = baseline(c, date, now) if date != today else cached_baseline(c, date, now)
+            d = day(c, date, now, base=b)
+            have = {r["ts"]: (r["state"], r["score"], r["hr"], r["rmssd"]) for r in c.execute(
+                "SELECT ts, state, score, hr, rmssd FROM stress WHERE date=?", (date,))}
+            stamp = time.time()
+            # only rows that changed get a new computed_at, so cloud_sync pushes just those
+            c.executemany(f"INSERT OR REPLACE INTO stress({COLS}) VALUES({cols})",
+                          [(w["ts"], date, w["state"], w["score"], w["hr"], w["rmssd"], w["n_rr"], w["move"], stamp)
+                           for w in d["series"]
+                           if have.get(w["ts"]) != (w["state"], w["score"], w["hr"], w["rmssd"])])
+            out[date] = d
+        c.commit()
+        db.set_state(c, "stress_now", json.dumps(out[today]["now"]))
+        return out
+    finally:
+        if own:
+            c.close()
 
 
 def _clock(ts):

@@ -17,7 +17,7 @@ Usage:
   python import_data.py --dir templates/ --dry-run     # validate without writing
 Re-running is safe: rows are upserted by date / start time.
 """
-import argparse, csv, datetime as dt, os, sys
+import argparse, csv, datetime as dt, math, os, sys
 import db
 
 DAILY_REQ, WORKOUT_REQ, HR_REQ = "date", "start", "timestamp"
@@ -28,9 +28,12 @@ def num(v, cast=float):
     if not v:
         return None
     try:
-        return cast(float(v))
+        x = float(v)
     except ValueError:
-        raise ValueError(f"not a number: {v!r}")
+        raise ValueError(f"not a number: {v!r}") from None
+    if not math.isfinite(x):
+        raise ValueError(f"not a finite number: {v!r}")
+    return cast(x)
 
 
 def iso(v):
@@ -41,7 +44,7 @@ def iso(v):
     try:
         d = dt.datetime.fromisoformat(v.replace("Z", "+00:00"))
     except ValueError:
-        raise ValueError(f"not an ISO date/time: {v!r}")
+        raise ValueError(f"not an ISO date/time: {v!r}") from None
     if d.tzinfo:
         d = d.astimezone(dt.timezone.utc).replace(tzinfo=None)
     return d.isoformat() + "Z"
@@ -98,7 +101,10 @@ def workout_rows(row):
 
 def hr_rows(row):
     ts = dt.datetime.fromisoformat(iso(row["timestamp"])[:-1]).replace(tzinfo=dt.timezone.utc).timestamp()
-    return [("ble_hr", {"ts": ts, "hr": num(row.get("hr"), int), "rr_ms": ""})]
+    hr = num(row.get("hr"), int)
+    if hr is None:
+        raise ValueError("missing hr")
+    return [("ble_hr", {"ts": ts, "hr": hr, "rr_ms": ""})]
 
 
 def main():
@@ -124,19 +130,23 @@ def main():
         db.DB_PATH = a.db
     c = None if a.dry_run else db.connect()
     counts, errors = {}, []
-    for path, req, fn in plan:
-        if not path:
-            continue
-        for line, row in read(path, req):
-            try:
-                for table, rec in fn(row):
-                    counts[table] = counts.get(table, 0) + 1
-                    if c:
-                        db.upsert(c, table, rec)
-            except ValueError as e:
-                errors.append(f"{os.path.basename(path)}:{line}: {e}")
-    if c:
-        c.commit(); c.close()
+    try:
+        for path, req, fn in plan:
+            if not path:
+                continue
+            for line, row in read(path, req):
+                try:
+                    for table, rec in fn(row):
+                        counts[table] = counts.get(table, 0) + 1
+                        if c:
+                            db.upsert(c, table, rec)
+                except ValueError as e:
+                    errors.append(f"{os.path.basename(path)}:{line}: {e}")
+        if c:
+            c.commit()
+    finally:
+        if c:
+            c.close()
     for e in errors[:20]:
         print("skip", e, file=sys.stderr)
     verb = "would import" if a.dry_run else f"imported into {db.DB_PATH}"

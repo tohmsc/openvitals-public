@@ -149,6 +149,45 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(metrics.steps(self.c, T, T + 600), 58)
         self.assertIsNone(metrics.steps(self.c, T + 3600, T + 7200))
 
+    def test_motion_is_not_double_counted_on_second_decode_run(self):
+        frames = [rec(i, accel=(0.0, 0.0, 1.0 + 0.02 * (i % 2))) for i in range(60)]
+        self.load(frames)
+        decode.run(quiet=True)
+        first = self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone()
+        self.load([rec(100, ts=T + 120)])
+        decode.run(quiet=True)
+        second = self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone()
+        self.assertEqual((first["n"], first["move_sum"]), (second["n"], second["move_sum"]))
+
+    def test_counts_doubled_by_an_older_version_are_rebuilt_once(self):
+        self.load([rec(i, accel=(0.0, 0.0, 1.0 + 0.02 * (i % 2))) for i in range(60)])
+        decode.run(quiet=True)
+        right = tuple(self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone())
+        # what the old backfill left behind: every minute added a second time
+        self.c.execute("UPDATE motion_min SET n = n * 2, move_sum = move_sum * 2")
+        self.c.execute("DELETE FROM sync_state WHERE key = 'motion_recounted'"); self.c.commit()
+        decode.run(quiet=True)
+        self.assertEqual(tuple(self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone()), right)
+        self.c.execute("UPDATE motion_min SET n = 999"); self.c.commit()
+        decode.run(quiet=True)                                # only once
+        self.assertEqual(self.c.execute("SELECT n FROM motion_min WHERE minute=?", (T,)).fetchone()["n"], 999)
+
+    def test_bad_hex_row_does_not_stall_decode(self):
+        self.c.execute("INSERT INTO ble_raw(ts,channel,ptype,hex) VALUES(?,?,?,?)", (T, "0005", 0x2F, "not-valid-hex"))
+        self.c.commit()
+        self.load([rec(0, hr=62)])
+        decode.run(quiet=True)
+        self.assertEqual(self.c.execute("SELECT COUNT(*) n FROM ble_hr").fetchone()["n"], 1)
+
+    def test_backfill_commits_even_when_no_new_frames_arrived(self):
+        self.load(self.night())
+        decode.run(quiet=True)
+        self.c.execute("DELETE FROM strap_min"); self.c.execute("DELETE FROM offwrist")
+        self.c.execute("DELETE FROM sync_state WHERE key LIKE 'strap%'"); self.c.commit()
+        decode.run(quiet=True)                                # no new frames after watermark
+        self.assertEqual(len(self.table()), 3)
+        self.assertEqual(db.get_state(self.c, "strap_backfilled"), "1")
+
 
 class NightTest(unittest.TestCase):
     def setUp(self):
@@ -200,6 +239,27 @@ class NightTest(unittest.TestCase):
         self.c.commit()
         r = signals.update(self.c)[0]
         self.assertEqual((r["date"], r["minutes"], r["temp_raw"]), (d, 180, 345))
+
+    def test_update_handles_missing_strap_min_table(self):
+        orig = db.DB_PATH
+        try:
+            db.DB_PATH = os.path.join(tempfile.mkdtemp(prefix="whoop-sig-"), "t.db")
+            c = db.connect()
+            try:
+                import sleep
+                c.execute(sleep.SCHEMA)
+                wake = (int(time.time()) // 86400 - 1) * 86400 + 6 * 3600
+                date = time.strftime("%Y-%m-%d", time.gmtime(wake))
+                c.execute("INSERT INTO sleep_night(date,onset,wake,status) VALUES(?,?,?,?)",
+                          (date, wake - 7 * 3600, wake, "done"))
+                c.commit()
+                rows = signals.update(c)
+                self.assertEqual(rows[0]["status"], "too little")
+                self.assertEqual(rows[0]["minutes"], 0)
+            finally:
+                c.close()
+        finally:
+            db.DB_PATH = orig
 
 
 if __name__ == "__main__":

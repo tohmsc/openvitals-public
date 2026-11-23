@@ -7,7 +7,7 @@
 Keeps the last 30 snapshots (7 when the daemon takes one a day); older ones are pruned.
 Run standalone, from the collector, or from the daemon.
 """
-import sqlite3, os, json, csv, time, glob, re, subprocess, sys, datetime as dt
+import sqlite3, os, json, csv, glob, re, subprocess, sys, datetime as dt
 import db
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,13 +20,20 @@ def _encrypt(path):
     if not os.path.exists(KEY):
         return path
     enc = path + ".enc"
-    subprocess.run(["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-salt",
-                    "-in", path, "-out", enc, "-pass", f"file:{KEY}"], check=True)
+    tmp = enc + ".tmp"
+    try:
+        subprocess.run(["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-salt",
+                        "-in", path, "-out", tmp, "-pass", f"file:{KEY}"], check=True)
+        os.replace(tmp, enc)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
     os.remove(path)
     return enc
 
 def decrypt(enc_path, out_path=None):
-    out_path = out_path or enc_path[:-4]
+    out_path = out_path or (enc_path[:-4] if enc_path.endswith(".enc") else enc_path + ".dec")
     subprocess.run(["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
                     "-in", enc_path, "-out", out_path, "-pass", f"file:{KEY}"], check=True)
     print("decrypted ->", out_path)
@@ -36,7 +43,7 @@ def prune(keep=30):
     or not) belonging to older ones."""
     stamp_of = lambda p: (re.search(r"-(\d{8}-\d{6})\.", os.path.basename(p)) or [None, None])[1]
     files = [p for p in glob.glob(os.path.join(BK, "*")) if stamp_of(p)]
-    keep_stamps = set(sorted({stamp_of(p) for p in files})[-keep:])
+    keep_stamps = set(sorted({stamp_of(p) for p in files})[-keep:]) if keep > 0 else set()
     for p in files:
         if stamp_of(p) not in keep_stamps:
             os.remove(p)
@@ -45,16 +52,24 @@ TABLES = ["api_sleep", "api_recovery", "api_cycle", "api_workout",
           "api_profile", "ble_hr", "ble_raw", "clock_sync", "raw_archive", "daily_night", "sync_state"]
 
 def snapshot(keep=30):
+    os.makedirs(BK, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     src = db.connect()
-    # consistent .db copy
-    dst_path = os.path.join(BK, f"whoop-{stamp}.db")
-    dst = sqlite3.connect(dst_path)
-    src.backup(dst); dst.close()
-    # JSON (all tables except the bulky raw frames, which the .db snapshot already holds)
-    data = {t: [dict(r) for r in src.execute(f"SELECT * FROM {t}").fetchall()] for t in TABLES if t != "ble_raw"}
+    try:
+        # consistent .db copy
+        dst_path = os.path.join(BK, f"whoop-{stamp}.db")
+        dst = sqlite3.connect(dst_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+        # JSON (all tables except the bulky raw frames, which the .db snapshot already holds)
+        data = {t: [dict(r) for r in src.execute(f"SELECT * FROM {t}").fetchall()] for t in TABLES if t != "ble_raw"}
+    finally:
+        src.close()
     json_path = os.path.join(BK, f"whoop-{stamp}.json")
-    json.dump(data, open(json_path, "w"), indent=1)
+    with open(json_path, "w") as f:
+        json.dump(data, f, indent=1)
     # CSV (health tables)
     for t in ("api_recovery", "api_sleep", "api_cycle", "api_workout"):
         rows = data[t]

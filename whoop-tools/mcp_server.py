@@ -12,7 +12,7 @@ or to Claude Desktop's claude_desktop_config.json:
     "mcpServers": {"openvitals": {"command": "/Users/you/whoop-os/whoop-tools/.venv/bin/python",
                                   "args": ["/Users/you/whoop-os/whoop-tools/mcp_server.py"]}}
 """
-import json, os, re, sqlite3, sys, time, traceback
+import json, math, os, re, sqlite3, sys, time, traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
@@ -59,9 +59,15 @@ def t_today():
     est = rows(c.execute("SELECT date, kind, value, ok, why FROM estimates WHERE date >= ? ORDER BY date DESC, kind",
                          (_day(86400),))) if _has(c, "estimates") else []
     live = c.execute("SELECT value FROM sync_state WHERE key='live_hr_now'").fetchone()
-    live = json.loads(live["value"]) if live else None
-    if live:
-        live["age_s"] = round(time.time() - live.get("ts", 0))
+    try:
+        live = json.loads(live["value"]) if live and live["value"] else None
+    except ValueError:
+        live = None
+    if isinstance(live, dict):
+        ts = live.get("ts")
+        live["age_s"] = round(time.time() - ts) if ts is not None else None
+    else:
+        live = None
     out = {"date": today, "estimates": est, "live": live, "alerts": alerts.active(c, today), "note": NOTE}
     for k, fn in (("battery", "battery"), ("pack_battery", "pack_battery")):
         try:
@@ -103,8 +109,11 @@ def t_scores(days=14, kind=None):
 
 
 def t_heart_rate(hours=6, end=None, step_s=60):
-    end = float(end) if end else time.time()
-    start = end - float(hours) * 3600
+    hrs = float(hours)
+    end = float(end) if end is not None else time.time()
+    if not (math.isfinite(hrs) and hrs > 0 and math.isfinite(end)):
+        raise ValueError("hours must be a positive finite number")
+    start = end - hrs * 3600
     step = max(1, int(step_s))
     if (end - start) / step > 2000:
         step = int((end - start) / 2000) + 1
@@ -117,24 +126,30 @@ def t_heart_rate(hours=6, end=None, step_s=60):
 
 def t_schema():
     c = ro()
-    out = {}
-    for (name,) in c.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
-        out[name] = [r["name"] for r in c.execute(f"PRAGMA table_info({name})")]
-    return {"tables": out, "hint": "ble_raw holds raw strap frames (large); ble_hr is 1 Hz heart rate with "
-            "beat intervals in ms; daily_night / sleep_night / estimates are per day."}
+    try:
+        out = {}
+        for (name,) in c.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
+            out[name] = [r["name"] for r in c.execute(f"PRAGMA table_info({name})")]
+        return {"tables": out, "hint": "ble_raw holds raw strap frames (large); ble_hr is 1 Hz heart rate with "
+                "beat intervals in ms; daily_night / sleep_night / estimates are per day."}
+    finally:
+        c.close()
 
 
 READ_ONLY = re.compile(r"^\s*(select|with)\b", re.I)
 
 
 def t_sql(query):
-    if not READ_ONLY.match(query or "") or ";" in query.strip().rstrip(";"):
+    if not isinstance(query, str) or not READ_ONLY.match(query) or ";" in query.strip().rstrip(";"):
         raise ValueError("only a single SELECT (or WITH ... SELECT) statement")
     c = ro()
-    cur = c.execute(query)
-    cols = [d[0] for d in cur.description or []]
-    data = cur.fetchmany(MAX_ROWS + 1)
-    return {"columns": cols, "rows": [list(r) for r in data[:MAX_ROWS]], "truncated": len(data) > MAX_ROWS}
+    try:
+        cur = c.execute(query)
+        cols = [d[0] for d in cur.description or []]
+        data = cur.fetchmany(MAX_ROWS + 1)
+        return {"columns": cols, "rows": [list(r) for r in data[:MAX_ROWS]], "truncated": len(data) > MAX_ROWS}
+    finally:
+        c.close()
 
 
 def _has(c, t):
@@ -171,9 +186,15 @@ def tool_list():
 
 def handle(msg):
     """One JSON-RPC message in; the reply dict, or None for notifications."""
-    mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
+    if not isinstance(msg, dict):
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}
+    mid, method, params = msg.get("id"), msg.get("method"), msg.get("params")
     if mid is None:
         return None
+    if params is None:
+        params = {}
+    elif not isinstance(params, dict):
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "params must be an object"}}
     if method == "initialize":
         return {"jsonrpc": "2.0", "id": mid, "result": {
             "protocolVersion": params.get("protocolVersion") or PROTOCOL,
@@ -189,8 +210,13 @@ def handle(msg):
         name = params.get("name")
         if name not in TOOLS:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": f"unknown tool {name}"}}
+        args = params.get("arguments")
+        if args is None:
+            args = {}
+        elif not isinstance(args, dict):
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "arguments must be an object"}}
         try:
-            out = TOOLS[name][0](**(params.get("arguments") or {}))
+            out = TOOLS[name][0](**args)
             return {"jsonrpc": "2.0", "id": mid, "result": {
                 "content": [{"type": "text", "text": json.dumps(out, default=str)}], "isError": False}}
         except Exception as ex:
@@ -213,7 +239,8 @@ def main():
                 reply = handle(msg)
             except Exception:
                 traceback.print_exc(file=sys.stderr)
-                reply = {"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32603, "message": "internal error"}}
+                mid = msg.get("id") if isinstance(msg, dict) else None
+                reply = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": "internal error"}}
         if reply is not None:
             sys.stdout.write(json.dumps(reply) + "\n")
             sys.stdout.flush()

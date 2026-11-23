@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Characterize the 19200 stream, then try DTR/RTS reset to catch a boot banner."""
-import sys, time, serial
+import time, serial
 
 PORT = "/dev/cu.usbserial-DP06AXHE"
 

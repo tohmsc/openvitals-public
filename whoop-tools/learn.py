@@ -79,7 +79,7 @@ def _cached(c, key, stamp, build):
         got = json.loads(db.get_state(c, key) or "null")
     except ValueError:
         got = None
-    if got and got.get("stamp") == stamp:
+    if isinstance(got, dict) and got.get("stamp") == stamp:
         return got["value"]
     value = build()
     db.set_state(c, key, json.dumps({"stamp": stamp, "value": value}))
@@ -89,7 +89,7 @@ def _cached(c, key, stamp, build):
 # ---------------- from the WHOOP archive ----------------
 def _archive(c):
     return c.execute("SELECT created_at, recovery_score r, resting_hr rhr, hrv_rmssd_ms hrv FROM api_recovery "
-                     "WHERE recovery_score IS NOT NULL AND resting_hr > 0 AND hrv_rmssd_ms > 0 "
+                     "WHERE created_at IS NOT NULL AND recovery_score IS NOT NULL AND resting_hr > 0 AND hrv_rmssd_ms > 0 "
                      "ORDER BY created_at").fetchall()
 
 
@@ -180,13 +180,15 @@ def night_window(c):
         for s in c.execute("SELECT start, end, raw FROM api_sleep WHERE COALESCE(nap,0)=0 AND start IS NOT NULL "
                            "AND end IS NOT NULL ORDER BY start DESC LIMIT 120"):
             try:
-                off = json.loads(s["raw"] or "{}").get("timezone_offset") or "+00:00"
+                raw = json.loads(s["raw"] or "{}")
+                off = (raw.get("timezone_offset") if isinstance(raw, dict) else None) or "+00:00"
                 sec = (1 if off[0] == "+" else -1) * (int(off[1:3]) * 3600 + int(off[4:6]) * 60)
-            except (ValueError, IndexError):
+                b = ((_utc(s["start"]) + sec) % 86400) / 3600
+                w = ((_utc(s["end"]) + sec) % 86400) / 3600
+            except (ValueError, IndexError, TypeError):
                 continue
-            b = ((_utc(s["start"]) + sec) % 86400) / 3600
             bed.append(b - 24 if b > 12 else b)
-            wake.append(((_utc(s["end"]) + sec) % 86400) / 3600)
+            wake.append(w)
         if len(bed) < 30:
             return list(metrics.NIGHT)
         bed.sort(); wake.sort()
@@ -224,7 +226,7 @@ def usual(c, today):
                     "ORDER BY date DESC", (today, _date(day0 - WINDOW_DAYS * 86400))).fetchall()
     if len(own) >= MIN_NIGHTS:
         rhr = [r["rhr"] for r in own]
-        hrv = [r["hrv"] for r in own if r["hrv"]]
+        hrv = [r["hrv"] for r in own if r["hrv"] and r["hrv"] > 0]
         u = {"rhr": _median(rhr), "hrv": _median(hrv), "nights": len(own), "source": "own", "then": t}
         if len(rhr) >= 5:
             spreads["rhr_spread"] = _spread(rhr, *RHR_SPREAD)
@@ -265,7 +267,7 @@ def recovery(night, u, m=None):
         return None
     m = m or DEFAULT_MODEL
     zr = (night["resting"] - u["rhr"]) / u.get("rhr_spread", RHR_SPREAD[1])
-    if night.get("rmssd") and u.get("hrv") and night.get("n_rr", MIN_RR) >= MIN_RR:
+    if night.get("rmssd") and night["rmssd"] > 0 and u.get("hrv") and u["hrv"] > 0 and night.get("n_rr", MIN_RR) >= MIN_RR:
         zh = math.log(night["rmssd"] / u["hrv"]) / u.get("hrv_spread", HRV_SPREAD[1])
         a, b, w = m["both"]
         est, basis = a + b * zr + w * zh, "hrv+rhr"
@@ -388,8 +390,8 @@ def summary(c, today=None):
 
 
 def _clock(h):
-    h %= 24
-    return f"{int(h):02d}:{int(round(h % 1 * 60)) % 60:02d}"
+    m = round(h * 60) % (24 * 60)
+    return f"{m // 60:02d}:{m % 60:02d}"
 
 
 def learned_text(c, today=None):

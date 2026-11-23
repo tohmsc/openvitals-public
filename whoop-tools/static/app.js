@@ -27,7 +27,7 @@
       const n = parseInt(c.slice(1), 16);
       return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
     }
-    const [r, g, b] = c.match(/[\d.]+/g);
+    const [r, g, b] = c.match(/[\d.]+/g) || [0, 0, 0];
     return `rgba(${r},${g},${b},${a})`;
   };
 
@@ -44,9 +44,11 @@
   const fmtU = (v, u, d = 0) => (v == null || Number.isNaN(v) ? "—" : `${fmt(v, d)}${u}`);
 
   function ago(ms) {
+    if (!Number.isFinite(ms)) return "—";
     const s = (Date.now() - ms) / 1000;
     const steps = [[60, "second"], [3600, "minute", 60], [86400, "hour", 3600], [86400 * 30, "day", 86400], [86400 * 365, "month", 86400 * 30], [Infinity, "year", 86400 * 365]];
     for (const [lim, unit, div = 1] of steps) if (Math.abs(s) < lim) return rtf.format(-Math.round(s / div), unit);
+    return "—";
   }
   const hm = (ms) => {
     if (ms == null) return "—";
@@ -320,7 +322,7 @@
   }
   const zScore = (series) => {
     const latest = series.at(-1), b = baseline(series);
-    if (!b || latest == null || !b.sd) return null;
+    if (!b || latest == null || !b.sd || !b.mean) return null;
     return { z: (latest - b.mean) / b.sd, pct: ((latest - b.mean) / b.mean) * 100, mean: b.mean };
   };
 
@@ -397,7 +399,7 @@
         const z = b.sd ? (latest - b.mean) / b.sd : 0;
         const f = z > 1 ? "up" : z < -1 ? "down" : "info";
         word = f === "up" ? "Above usual" : f === "down" ? "Below usual" : "Usual";
-        const pct = ((latest - b.mean) / b.mean) * 100;
+        const pct = b.mean ? ((latest - b.mean) / b.mean) * 100 : 0;
         const sign = pct > 0 ? "+" : pct < 0 ? "−" : "±";
         // The state is written out, not carried by the dot's color alone.
         flag = `<span class="vital__flag" data-zone="${f}"><span class="status__icon" aria-hidden="true"></span>${word}</span>`;
@@ -531,11 +533,12 @@
     $("#ln-h").textContent = recent ? "Last night" : "That night";
     $("#ln-date").textContent = `${recent ? "" : dShort.format(+day(s.end)) + (new Date(s.end).getFullYear() !== new Date().getFullYear() ? `, ${new Date(s.end).getFullYear()}` : "") + " · "}${dTime.format(+day(s.start))} – ${dTime.format(+day(s.end))}`;
     const asleep = (s.total_in_bed_ms || 0) - (s.total_awake_ms || 0);
+    const asleepM = Math.max(0, Math.round(asleep / 6e4));
     const SG = stagesOf(s);
     const total = SG.reduce((t, st) => t + (s[st.key] || 0), 0) || 1;
     host.innerHTML = `
       <div>
-        <p class="headline" aria-label="${hm(asleep)} asleep"><span class="headline__num">${Math.floor(asleep / 36e5)}</span><span class="headline__unit">h</span><span class="headline__num">${Math.round((asleep % 36e5) / 6e4)}</span><span class="headline__unit">m</span></p>
+        <p class="headline" aria-label="${hm(asleep)} asleep"><span class="headline__num">${Math.floor(asleepM / 60)}</span><span class="headline__unit">h</span><span class="headline__num">${asleepM % 60}</span><span class="headline__unit">m</span></p>
         <p class="headline__label">Time asleep${s.sleep_perf == null ? "" : ` · ${fmt(s.sleep_perf)}% of sleep needed`}${s.est ? ` · strap estimate (${s.est}), no sleep stages` : ""}</p>
       </div>
       <div>
@@ -727,7 +730,7 @@
       return;
     }
     const hm = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const dur = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.round(s / 60)} min`);
+    const dur = (s) => { const m = Math.round(s / 60); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m} min`; };
     el.innerHTML = days.map((c, i) => {
       const day = i === 0 ? "Today" : i === 1 ? "Yesterday" : new Date(`${c.date}T12:00:00`).toLocaleDateString([], { weekday: "short", day: "numeric" });
       const rec = Math.min(100, c.share * 100);
@@ -820,7 +823,9 @@
   let wasLive = null;
   async function pollLive() {
     try {
-      const L = await (await fetch("/api/live", { cache: "no-store" })).json();
+      const r = await fetch("/api/live", { cache: "no-store" });
+      if (!r.ok) return;
+      const L = await r.json();
       if (wasLive !== null && wasLive !== L.live) announcer.textContent = L.live ? `Strap connected, ${L.hr} beats per minute` : "Strap disconnected";
       wasLive = L.live;
       renderLive(L);
@@ -1012,7 +1017,9 @@
     try {
       const r = await fetch("/api/feel", { method: "POST", headers: { "X-Vitals": "1", "Content-Type": "application/json" }, body: JSON.stringify({ feel: b.dataset.feel }) });
       if (!r.ok) return;
-      const fresh = await (await fetch("/api/summary", { cache: "no-store" })).json();
+      const r2 = await fetch("/api/summary", { cache: "no-store" });
+      if (!r2.ok) return;
+      const fresh = await r2.json();
       DATA.personal = fresh.personal;
       renderToday(DATA);
     } catch { /* offline: the buttons stay as they were */ }
@@ -1022,9 +1029,9 @@
     for (const k of ["rhr", "hrv", "avgHr"]) if (B[k]) B[k].own = B.own;
     VS.today = T; VS.baseline = B;
     const yr = B.end ? new Date(B.end).getFullYear() : "";
-    const versus = B.own ? `next to your usual from your last ${B.nights} nights` : `next to your usual from ${yr}`;
+    const versus = B.own ? `next to your usual from your last ${B.nights} nights` : yr ? `next to your usual from ${yr}` : "";
     $("#today-meta").textContent = T
-      ? `From the strap since ${dTime.format(T.first)}, ${versus}`
+      ? `From the strap since ${dTime.format(T.first)}${versus ? `, ${versus}` : ""}`
       : `${dToday.format(new Date())} · no strap data yet today`;
     const host = $("#today-summary");
     if (!T) {
@@ -1040,8 +1047,9 @@
         <div class="driver__top"><span class="driver__name">${name}</span><span class="driver__val">${fmt(v, dd)}<small>${unit}</small></span></div>
         ${b?.mean ? cmpBar(v, b, color, dd) : `<p class="driver__note">${note}</p>`}
       </li>`;
+    const actM = Math.max(0, Math.round(T.activeMs / 6e4));
     host.innerHTML = `
-      <p class="headline"><span class="headline__num">${Math.floor(T.activeMs / 36e5)}</span><span class="headline__unit">h</span><span class="headline__num">${Math.round((T.activeMs % 36e5) / 6e4)}</span><span class="headline__unit">m</span></p>
+      <p class="headline"><span class="headline__num">${Math.floor(actM / 60)}</span><span class="headline__unit">h</span><span class="headline__num">${actM % 60}</span><span class="headline__unit">m</span></p>
       <p class="headline__label">of heart rate recorded today</p>
       <ul class="drivers">
         ${row("Average heart rate", T.avg, "bpm", B.avgHr, "--m-rhr", "")}
@@ -1067,7 +1075,7 @@
     clearEmpty("c-today");
     $("#today-stat").innerHTML = `Average <strong>${fmt(T.avg)} bpm</strong> · range ${T.min}–${T.max} bpm · ${keys.length} minute${keys.length === 1 ? "" : "s"} with data`;
     const color = tok("--m-hr-ui");
-    const o = baseOptions({ y: { grace: "10%" }, plugins: { avgLine: { value: B.rhr.mean } } });
+    const o = baseOptions({ y: { grace: "10%" }, plugins: { avgLine: { value: B.rhr?.mean } } });
     const x0 = Math.min(T.first, Date.now() - 2 * 36e5), x1 = Date.now();
     Object.assign(o.scales.x, { type: "linear", min: x0, max: x1, ticks: { ...o.scales.x.ticks, maxTicksLimit: 8, callback: (v) => dTime.format(v) } });
     o.plugins.tooltip.callbacks = { title: (i) => dTime.format(i[0].parsed.x), label: (i) => ` ${i.dataset.label}: ${fmt(i.parsed.y)} bpm` };
@@ -1077,7 +1085,7 @@
       data: { datasets: [
         { label: "Min", data: mn, borderWidth: 0, pointRadius: 0, spanGaps: false },
         { label: "Max", data: mx, borderWidth: 0, pointRadius: 0, fill: "-1", backgroundColor: alpha(color, 0.18), spanGaps: false },
-        { label: "Average", data: av, borderColor: color, backgroundColor: color, borderWidth: 1.5, pointRadius: (c) => { const d = c.dataset.data; const i = c.dataIndex; return d[i] != null && d[i - 1] == null && d[i + 1] == null ? 1.5 : 0; }, pointHoverRadius: 4, tension: 0.25, spanGaps: false },
+        { label: "Average", data: av, borderColor: color, backgroundColor: color, borderWidth: 1.5, pointRadius: (c) => { const d = c.dataset.data; const i = c.dataIndex; return d[i]?.y != null && d[i - 1]?.y == null && d[i + 1]?.y == null ? 1.5 : 0; }, pointHoverRadius: 4, tension: 0.25, spanGaps: false },
       ] },
       options: o,
       plugins: [avgLine, crosshair],
@@ -1198,19 +1206,26 @@
     document.querySelectorAll("[data-sync-msg]").forEach((m) => { m.textContent = msg || ""; m.dataset.tone = tone || ""; });
   }
   async function pollSync(before) {
-    const s = await (await fetch("/api/sync", { cache: "no-store" })).json();
-    if (s.running) {
-      const last = s.log.at(-1) || "Starting…";
-      setSyncUI("running", last.length > 64 ? last.slice(0, 64) + "…" : last);
-      return setTimeout(() => pollSync(before), 1500);
+    try {
+      const r = await fetch("/api/sync", { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      const s = await r.json();
+      const log = Array.isArray(s.log) ? s.log : [];
+      if (s.running) {
+        const last = log.at(-1) || "Starting…";
+        setSyncUI("running", last.length > 64 ? last.slice(0, 64) + "…" : last);
+        return setTimeout(() => pollSync(before), 1500);
+      }
+      await load();
+      const after = DATA?.recovery[0]?.created_at;
+      const strap = log.find((l) => /drained|not in range|not reachable|holds the strap/.test(l));
+      const fresh = after && after !== before;
+      setSyncUI("idle",
+        (fresh ? "New WHOOP scores pulled. " : "WHOOP has no newer scores. ") + (strap ? strap.replace(/^strap /, "Strap ") : ""),
+        s.ok === false ? "warn" : fresh ? "ok" : "warn");
+    } catch {
+      setSyncUI("idle", "Lost contact with the dashboard while syncing.", "warn");
     }
-    await load();
-    const after = DATA?.recovery[0]?.created_at;
-    const strap = s.log.find((l) => /drained|not in range|not reachable|holds the strap/.test(l));
-    const fresh = after && after !== before;
-    setSyncUI("idle",
-      (fresh ? "New WHOOP scores pulled. " : "WHOOP has no newer scores. ") + (strap ? strap.replace(/^strap /, "Strap ") : ""),
-      s.ok === false ? "warn" : fresh ? "ok" : "warn");
   }
   async function startSync() {
     const before = DATA?.recovery[0]?.created_at;
@@ -1255,6 +1270,10 @@
       const r = await fetch(summaryUrl(), { cache: "no-store" });
       if (!r.ok) throw new Error(r.status);
       DATA = await r.json();
+      for (const k of ["recovery", "sleep", "cycle", "workout", "today_hr", "soc", "logs", "nights", "coverage", "alerts"]) {
+        if (!Array.isArray(DATA[k])) DATA[k] = [];
+      }
+      if (!DATA.counts || typeof DATA.counts !== "object") DATA.counts = {};
       mergeEstimates(DATA);
       REC_BY_DAY = new Map();
       for (const x of DATA.recovery.slice().reverse()) REC_BY_DAY.set(ymd(+day(x.created_at)), x);
@@ -1269,7 +1288,8 @@
       console.error(e);
       main.setAttribute("aria-busy", "false");
       err.hidden = false;
-      $("#sync-status").textContent = "Offline";
+      const st = $("#sync-text");
+      if (st) st.textContent = "Offline";
     }
   }
   $("#retry").addEventListener("click", load);

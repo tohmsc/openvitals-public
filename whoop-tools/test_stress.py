@@ -172,6 +172,14 @@ class StressTest(unittest.TestCase):
         self.assertEqual(stress.level(self.c.execute("SELECT score FROM stress WHERE ts=?", (at(9, 30),)).fetchone()["score"]),
                          "Low")
 
+    def test_zero_hrv_night_does_not_crash_stress_score(self):
+        self.c.execute("INSERT INTO daily_night(date,rhr,hrv) VALUES(?,?,?)", ("2026-11-09", 55, 0.0))
+        self.c.commit()
+        b = stress.baseline(self.c, DATE, now=at(18))
+        self.assertEqual(b["source"], "default")
+        self.assertIsNotNone(stress.score({"state": "ok", "hr": 60, "rmssd": 40}, b))
+        self.assertIsNone(stress.score({"state": "ok", "hr": 60, "rmssd": -5}, b))
+
 
 if __name__ == "__main__":
     unittest.main()

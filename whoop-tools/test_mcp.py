@@ -10,14 +10,25 @@ class McpTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls._orig_db = db.DB_PATH
+        cls.db_path = os.path.join(tempfile.mkdtemp(prefix="whoop-mcp-"), "t.db")
+        db.DB_PATH = cls.db_path
         c = db.connect()
-        now = time.time()
-        c.executemany("INSERT INTO ble_hr VALUES(?,?,?)", [(now - 120 + s, 60 + s % 5, "1000") for s in range(120)])
-        c.execute("INSERT INTO daily_night(date, rhr, hrv, n_rr) VALUES(?, 45, 60, 5000)", (time.strftime("%Y-%m-%d"),))
-        c.commit(); c.close()
+        try:
+            now = time.time()
+            c.executemany("INSERT INTO ble_hr VALUES(?,?,?)", [(now - 120 + s, 60 + s % 5, "1000") for s in range(120)])
+            c.execute("INSERT INTO daily_night(date, rhr, hrv, n_rr) VALUES(?, 45, 60, 5000)", (time.strftime("%Y-%m-%d"),))
+            c.commit()
+        finally:
+            c.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        db.DB_PATH = cls._orig_db
 
     def call(self, *msgs):
-        p = subprocess.run([sys.executable, os.path.join(HERE, "mcp_server.py")], env=os.environ,
+        env = dict(os.environ, WHOOP_DB=self.db_path)
+        p = subprocess.run([sys.executable, os.path.join(HERE, "mcp_server.py")], env=env,
                            input="".join(json.dumps(m) + "\n" for m in msgs), capture_output=True, text=True, timeout=30)
         return [json.loads(l) for l in p.stdout.splitlines()]
 
@@ -50,11 +61,25 @@ class McpTest(unittest.TestCase):
                     "WITH x AS (SELECT 1) DELETE FROM ble_hr"):
             self.assertTrue(self.tool("sql", query=bad)["isError"], bad)
         c = db.connect()
-        self.assertEqual(c.execute("SELECT COUNT(*) FROM ble_hr").fetchone()[0], 120)
+        try:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM ble_hr").fetchone()[0], 120)
+        finally:
+            c.close()
 
     def test_unknown_method(self):
         (r,) = self.call({"jsonrpc": "2.0", "id": 9, "method": "nope"})
         self.assertEqual(r["error"]["code"], -32601)
+
+    def test_malformed_json_rpc_does_not_crash_server(self):
+        replies = self.call(
+            [],
+            None,
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": []},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "today", "arguments": []}},
+            {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+        )
+        self.assertEqual([r.get("error", {}).get("code") for r in replies[:4]], [-32600, -32600, -32602, -32602])
+        self.assertEqual(replies[4]["result"], {})
 
 
 if __name__ == "__main__":

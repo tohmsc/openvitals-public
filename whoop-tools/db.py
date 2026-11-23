@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """SQLite store for WHOOP data from both the official API and the strap (BLE)."""
-import sqlite3, os, json, time
+import sqlite3, os, time
 
 DB_PATH = os.environ.get("WHOOP_DB") or os.path.join(os.path.dirname(__file__), "whoop.db")
 
@@ -98,29 +98,33 @@ def fix_rr_units(c):
     if c.execute("PRAGMA user_version").fetchone()[0] >= RR_FIX_VERSION:
         return 0
     c.execute("BEGIN IMMEDIATE")
-    if c.execute("PRAGMA user_version").fetchone()[0] >= RR_FIX_VERSION:   # another process did it
+    try:
+        if c.execute("PRAGMA user_version").fetchone()[0] >= RR_FIX_VERSION:   # another process did it
+            c.rollback()
+            return 0
+        rows = c.execute("SELECT ts, rr_ms FROM ble_hr WHERE rr_ms IS NOT NULL AND rr_ms != ''").fetchall()
+        fixed = []
+        for r in rows:
+            try:
+                vals = [round(float(x) * 1024 / 1000) for x in r["rr_ms"].split()]
+            except ValueError:
+                continue
+            fixed.append((" ".join(map(str, vals)), r["ts"]))
+        c.executemany("UPDATE ble_hr SET rr_ms = ? WHERE ts = ?", fixed)
+        # HRV (RMSSD) computed from those beats scales the same way. scores.py recomputes its
+        # last week on its own; these tables are written once and kept.
+        for table, col in (("daily_night", "hrv"), ("sleep_night", "hrv"), ("stress", "rmssd")):
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                c.execute(f"UPDATE {table} SET {col} = {col} * 1.024 WHERE {col} IS NOT NULL")
+        c.execute("CREATE TABLE IF NOT EXISTS cloud_hr_pending (ts REAL PRIMARY KEY)")
+        c.execute("INSERT OR IGNORE INTO cloud_hr_pending(ts) SELECT ts FROM ble_hr "
+                  "WHERE ts >= ? AND rr_ms != ''", (time.time() - RR_FIX_REPUSH_DAYS * 86400,))
+        c.execute(f"PRAGMA user_version = {RR_FIX_VERSION}")
+        c.commit()
+        return len(fixed)
+    except Exception:
         c.rollback()
-        return 0
-    rows = c.execute("SELECT ts, rr_ms FROM ble_hr WHERE rr_ms IS NOT NULL AND rr_ms != ''").fetchall()
-    fixed = []
-    for r in rows:
-        try:
-            vals = [round(float(x) * 1024 / 1000) for x in r["rr_ms"].split()]
-        except ValueError:
-            continue
-        fixed.append((" ".join(map(str, vals)), r["ts"]))
-    c.executemany("UPDATE ble_hr SET rr_ms = ? WHERE ts = ?", fixed)
-    # HRV (RMSSD) computed from those beats scales the same way. scores.py recomputes its
-    # last week on its own; these tables are written once and kept.
-    for table, col in (("daily_night", "hrv"), ("sleep_night", "hrv"), ("stress", "rmssd")):
-        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
-            c.execute(f"UPDATE {table} SET {col} = {col} * 1.024 WHERE {col} IS NOT NULL")
-    c.execute("CREATE TABLE IF NOT EXISTS cloud_hr_pending (ts REAL PRIMARY KEY)")
-    c.execute("INSERT OR IGNORE INTO cloud_hr_pending(ts) SELECT ts FROM ble_hr "
-              "WHERE ts >= ? AND rr_ms != ''", (time.time() - RR_FIX_REPUSH_DAYS * 86400,))
-    c.execute(f"PRAGMA user_version = {RR_FIX_VERSION}")
-    c.commit()
-    return len(fixed)
+        raise
 
 
 def connect():

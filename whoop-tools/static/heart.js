@@ -49,7 +49,7 @@
       scrollTo(0, 0);
       requestAnimationFrame(() => { resize(); layoutCallouts(); });
     } else {
-      const t = document.querySelector(h);
+      const t = document.getElementById(h.slice(1));
       if (h === "#overview" || h === "#today") requestAnimationFrame(() => scrollTo(0, 0));
       else if (t) requestAnimationFrame(() => t.scrollIntoView({ block: "start" }));
     }
@@ -118,7 +118,7 @@
   };
   function tickBeats(now) {
     if (!hrNow) { beats.length = 0; return; }
-    if (!beats.length) { beats.push(now + 200); return; }
+    if (!beats.length || now - beats.at(-1) > 5000) { beats.length = 0; beats.push(now + 200); return; }
     while (now >= beats.at(-1)) {
       const p = period() || 1000;
       beats.push(beats.at(-1) + p);
@@ -231,7 +231,8 @@
       const T = window.VITALS?.today;
       card.dataset.zone = "today";
       card.querySelector(".hv-card__label").textContent = "Recorded today";
-      num.innerHTML = T ? `${Math.floor(T.activeMs / 36e5)}<small>h</small> ${Math.round((T.activeMs % 36e5) / 6e4)}<small>m</small>` : "—";
+      const actM = T ? Math.max(0, Math.round(T.activeMs / 6e4)) : 0;
+      num.innerHTML = T ? `${Math.floor(actM / 60)}<small>h</small> ${actM % 60}<small>m</small>` : "—";
       $("#hv-rec-sub").textContent = T ? `since ${dTime.format(T.first)} · ${n0.format(T.samples.length)} samples` : "No strap data yet today";
       $("#hv-rec-zone").textContent = liveNow ? "Streaming" : "Strap idle";
     } else {
@@ -259,14 +260,14 @@
     if (!today) return;
     const n = (DATA?.nights || []).find((x) => x.date === ymd(Date.now()));
     let html;
-    if (!n) {
+    if (!n || !n.onset || !n.wake) {
       html = `<p class="hv-card__label">Last night</p><p class="sleep__empty">No sleep recorded. Wear the strap to bed and your night shows up here in the morning.</p>`;
     } else {
       const done = n.status === "done";
-      const t = Math.round(n.asleep_s / 60);
+      const t = Math.round((n.asleep_s || 0) / 60);
       let vs = "The rest of the night is still coming in from the strap.";
       if (done && n.usual_s) {
-        const d = n.asleep_s - n.usual_s;
+        const d = (n.asleep_s || 0) - n.usual_s;
         vs = Math.abs(d) < 1200 ? `About your usual ${hm(n.usual_s)}.` : `${hm(Math.abs(d))} ${d > 0 ? "more" : "less"} than your usual ${hm(n.usual_s)}.`;
       } else if (done) vs = "";
       let segs = [];
@@ -274,7 +275,7 @@
       const s0 = segs[0]?.[0], s1 = segs.at(-1)?.[1];
       const bar = segs.length && s1 > s0 ? segs.filter((g) => g[2] !== "-").map((g) =>
         `<span data-s="${g[2]}" style="left:${((g[0] - s0) / (s1 - s0) * 100).toFixed(2)}%;width:${((g[1] - g[0]) / (s1 - s0) * 100).toFixed(2)}%"></span>`).join("") : "";
-      const at = (x) => `${((x - s0) / (s1 - s0) * 100).toFixed(2)}%`;
+      const at = (x) => (s1 > s0 ? `${((x - s0) / (s1 - s0) * 100).toFixed(2)}%` : "0%");
       const on = dTime.format(n.onset * 1000), off = dTime.format(n.wake * 1000);
       const woke = !n.wakeups ? "No wake-ups" : n.wakeups === 1 ? "Woke up once" : `Woke up ${n.wakeups} times`;
       const facts = [done ? woke : null, n.rhr ? `Resting ${fmt(n.rhr)} bpm` : null, n.hrv ? `HRV ${fmt(n.hrv)} ms` : null].filter(Boolean).join(" · ");
@@ -364,7 +365,8 @@
     hrNow = window.VITALS.currentHr(LIVE); // null once the last reading is no longer fresh: the heart stops rather than beat on an old number
     if (liveNow && LIVE.rr_ms?.length) rrQueue = LIVE.rr_ms.slice(0, 4);
     $("#hv-pulse-state").textContent = liveNow ? "Live pulse" : hrNow ? "Offline" : "No signal";
-    $("#hv-pulse-meta").textContent = hrNow ? `${hrNow} bpm${liveNow && LIVE.rr_ms?.[0] ? ` · RR ${Math.round(LIVE.rr_ms[0])} ms` : liveNow ? "" : ` · ${ago(recent.at(-1).ts * 1000)}`}` : "";
+    const lastSampleTs = recent.at(-1)?.ts;
+    $("#hv-pulse-meta").textContent = hrNow ? `${hrNow} bpm${liveNow && LIVE.rr_ms?.[0] ? ` · RR ${Math.round(LIVE.rr_ms[0])} ms` : liveNow ? "" : lastSampleTs ? ` · ${ago(lastSampleTs * 1000)}` : ""}` : "";
     stage.dataset.live = String(liveNow);
     if (wasLive !== liveNow) { wasLive = liveNow; }
     renderCallouts();

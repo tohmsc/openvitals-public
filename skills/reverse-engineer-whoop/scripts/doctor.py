@@ -8,7 +8,7 @@ Usage (from anywhere):
 Each line is PASS / WARN / FAIL with the next action. An agent can run this after
 every phase of the skill to know what is done and what to do next.
 """
-import os, sys, json, sqlite3, shutil, socket, importlib, subprocess, time
+import os, sys, sqlite3, shutil, socket, importlib, subprocess, time
 
 WHOOP4_SVC = "61080001-8d6d-82b8-614a-1c8cb0f8dcc6"
 WHOOP5_PREFIX = "fd4b0001"
@@ -26,11 +26,12 @@ def say(level, what, fix=""):
 def env_keys(path):
     keys = {}
     if os.path.exists(path):
-        for line in open(path):
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                keys[k.strip()] = bool(v.strip()) and "your_" not in v and "<" not in v
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    keys[k.strip()] = bool(v.strip()) and "your_" not in v and "<" not in v
     return keys
 
 
@@ -109,20 +110,23 @@ def main():
         say("WARN", f"no database yet at {os.path.basename(dbp)}", "it appears after the first live.py / collector.py / whoop_api.py sync run")
     else:
         c = sqlite3.connect(f"file:{dbp}?mode=ro", uri=True)
-        def count(t):
-            try:
-                return c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-            except sqlite3.Error:
-                return None
-        hr, raw, rec = count("ble_hr"), count("ble_raw"), count("api_recovery")
-        say("PASS" if hr else "WARN", f"strap heart-rate samples: {hr or 0}", "" if hr else ".venv/bin/python live.py  (wear the strap)")
-        say("PASS" if raw else "WARN", f"raw strap frames drained: {raw or 0}", "" if raw else ".venv/bin/python collector.py --live 20")
-        say("PASS" if rec else "INFO", f"WHOOP API recovery scores: {rec or 0}", "" if rec else "optional: whoop_api.py login + sync (needs a WHOOP account)")
-        last = c.execute("SELECT MAX(ts) FROM ble_hr").fetchone()[0] if hr else None
-        if last:
-            say("INFO", f"last strap sample {int((time.time() - last) / 60)} min ago")
-        logs = count("device_logs")
-        say("PASS" if logs else "INFO", f"decoded firmware log lines: {logs or 0}", "" if logs else ".venv/bin/python decode.py")
+        try:
+            def count(t):
+                try:
+                    return c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                except sqlite3.Error:
+                    return None
+            hr, raw, rec = count("ble_hr"), count("ble_raw"), count("api_recovery")
+            say("PASS" if hr else "WARN", f"strap heart-rate samples: {hr or 0}", "" if hr else ".venv/bin/python live.py  (wear the strap)")
+            say("PASS" if raw else "WARN", f"raw strap frames drained: {raw or 0}", "" if raw else ".venv/bin/python collector.py --live 20")
+            say("PASS" if rec else "INFO", f"WHOOP API recovery scores: {rec or 0}", "" if rec else "optional: whoop_api.py login + sync (needs a WHOOP account)")
+            last = c.execute("SELECT MAX(ts) FROM ble_hr").fetchone()[0] if hr else None
+            if last:
+                say("INFO", f"last strap sample {int((time.time() - last) / 60)} min ago")
+            logs = count("device_logs")
+            say("PASS" if logs else "INFO", f"decoded firmware log lines: {logs or 0}", "" if logs else ".venv/bin/python decode.py")
+        finally:
+            c.close()
 
     # 5. Dashboard + background services
     s = socket.socket(); s.settimeout(0.5)

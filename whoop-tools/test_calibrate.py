@@ -149,6 +149,19 @@ class Calibrate(unittest.TestCase):
         self.assertEqual(scores.profile_age(self.c), 40.0)
         self.assertAlmostEqual(scores.personal_max_hr(self.c, scores.MODELS["generic-v1"]["strain"])[0], 180.0)
 
+    def test_singular_recovery_features_skip_instead_of_crashing(self):
+        # identical RHR and HRV on every day -> singular design matrix for lstsq
+        for i in range(50):
+            ts = f"2025-01-{(i % 28) + 1:02d}T07:00:00.000Z" if i < 28 else f"2025-02-{(i - 27):02d}T07:00:00.000Z"
+            sid = f"s{i}"
+            self.c.execute("INSERT INTO api_sleep(id,start,end,nap,sleep_perf,resp_rate,total_in_bed_ms,total_awake_ms) "
+                           "VALUES(?,?,?,0,80,14.5,28800000,1800000)", (sid, ts, ts))
+            self.c.execute("INSERT INTO api_recovery(cycle_id,sleep_id,created_at,recovery_score,resting_hr,hrv_rmssd_ms) "
+                           "VALUES(?,?,?,70,50,60)", (i, sid, ts))
+        self.c.commit()
+        res = calibrate.fit_recovery(self.c, scores.MODELS["generic-v1"]["recovery"])
+        self.assertIn("skip", res)
+
 
 if __name__ == "__main__":
     unittest.main()

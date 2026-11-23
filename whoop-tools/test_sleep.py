@@ -134,6 +134,19 @@ class SleepTest(unittest.TestCase):
         row = self.c.execute("SELECT status FROM sleep_night WHERE date='2026-11-19'").fetchone()
         self.assertEqual(row["status"], "done")
 
+    def test_minutes_bounds_and_missing_motion_table(self):
+        self.c.execute("INSERT INTO ble_hr(ts,hr,rr_ms) VALUES(?, 60, '')", (1125.0,))
+        self.c.commit()
+        move, hr = sleep.minutes(self.c, 1000.0, 1130.0)      # non-60s span must not IndexError
+        self.assertEqual(len(move), 2)
+        self.assertEqual(len(hr), 2)
+        orig = db.DB_PATH
+        try:
+            db.DB_PATH = os.path.join(tempfile.mkdtemp(prefix="whoop-fresh-"), "t.db")
+            self.assertEqual(sleep.update(now=at("09:00")), [])
+        finally:
+            db.DB_PATH = orig
+
 
 class MotionTest(unittest.TestCase):
     def setUp(self):

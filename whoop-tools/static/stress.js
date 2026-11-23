@@ -30,7 +30,7 @@
   function renderStress(s) {
     const now = $("#stress-now"), meta = $("#stress-meta"), base = $("#stress-base"), canvas = $("#c-stress");
     if (!now || !canvas) return;
-    const today = s && s.date === ymd(Date.now());
+    const today = s && s.date === ymd(Date.now()) && s.now && Array.isArray(s.series);
     if (!today) {
       now.innerHTML = `<span class="stress__level">No reading</span><span class="stress__why">Nothing from the strap today yet.</span>`;
       meta.textContent = "";
@@ -40,8 +40,8 @@
     }
     const n = s.now;
     if (n.level) {
-      now.style.setProperty("--c", `var(${LEVEL_VAR[n.level]})`);
-      now.innerHTML = `<span class="stress__dot" aria-hidden="true"></span><span class="stress__level">${n.level}</span>
+      now.style.setProperty("--c", `var(${LEVEL_VAR[n.level] || "--text-2"})`);
+      now.innerHTML = `<span class="stress__dot" aria-hidden="true"></span><span class="stress__level">${esc(n.level)}</span>
         <span class="stress__num">${n1.format(n.score)}<small> / 3</small></span>
         <span class="stress__why">as of ${dTime.format(n.ts * 1000)}${n.pending ? ", newer minutes still coming in from the strap" : ""}</span>`;
     } else {
@@ -79,7 +79,8 @@
           backgroundColor: css("--surface"), borderColor: css("--border"), borderWidth: 1, titleColor: css("--text"), bodyColor: css("--text-2"),
           callbacks: { title: (i) => dTime.format(i[0].parsed.x - 150000), label: (i) => {
             const w = s.series[i.dataIndex];
-            return w.score != null ? ` ${w.score >= 2 ? "High" : w.score >= 1 ? "Medium" : "Low"} ${n1.format(w.score)} · HR ${Math.round(w.hr)} · HRV ${Math.round(w.rmssd)} ms` : ` No score: ${STATE_WORD[w.state] || "no data"}`;
+            if (!w) return "";
+            return w.score != null ? ` ${w.score >= 2 ? "High" : w.score >= 1 ? "Medium" : "Low"} ${n1.format(w.score)}${w.hr != null ? ` · HR ${Math.round(w.hr)}` : ""}${w.rmssd != null ? ` · HRV ${Math.round(w.rmssd)} ms` : ""}` : ` No score: ${STATE_WORD[w.state] || "no data"}`;
           } } } },
         scales: {
           x: { type: "linear", min: x0, max: Date.now(), grid: { display: false }, border: { color: css("--grid") },

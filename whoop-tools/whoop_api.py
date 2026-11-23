@@ -31,7 +31,10 @@ def save_tokens(t):
     os.replace(tmp, TOKENS)
 
 def load_tokens():
-    return json.load(open(TOKENS)) if os.path.exists(TOKENS) else None
+    if not os.path.exists(TOKENS):
+        return None
+    with open(TOKENS) as f:
+        return json.load(f)
 
 # ---------------- OAuth ----------------
 def login():
@@ -86,20 +89,30 @@ def access_token():
         if time.time() - t.get("obtained_at", 0) < t.get("expires_in", 3600) - 120:
             return t["access_token"]
         e = env()
+        cid, csec = e.get("WHOOP_CLIENT_ID"), e.get("WHOOP_CLIENT_SECRET")
+        if not cid or not csec or not t.get("refresh_token"):
+            raise RuntimeError("Missing WHOOP OAuth credentials or refresh token; run: python whoop_api.py login")
         r = requests.post(TOKEN_URL, data={
             "grant_type":"refresh_token","refresh_token":t["refresh_token"],
-            "client_id":e["WHOOP_CLIENT_ID"],"client_secret":e["WHOOP_CLIENT_SECRET"],
+            "client_id":cid,"client_secret":csec,
             "scope":"offline"}, timeout=30)
         r.raise_for_status(); nt = r.json()
         nt.setdefault("refresh_token", t["refresh_token"])
         save_tokens(nt); return nt["access_token"]
 
-def get(path, params=None):
-    h = {"Authorization": f"Bearer {access_token()}"}
-    r = requests.get(API + path, headers=h, params=params, timeout=30)
-    if r.status_code == 429:
-        time.sleep(5); return get(path, params)
-    r.raise_for_status(); return r.json()
+def get(path, params=None, tries=5):
+    for attempt in range(tries):
+        h = {"Authorization": f"Bearer {access_token()}"}
+        r = requests.get(API + path, headers=h, params=params, timeout=30)
+        if r.status_code == 429 and attempt < tries - 1:
+            try:
+                wait = min(60.0, max(1.0, float(r.headers.get("Retry-After", 5))))
+            except ValueError:
+                wait = 5.0
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json()
 
 def paged(path, since=None):
     params = {"limit": 25}
@@ -122,6 +135,8 @@ def _overlap(since):
     """The watermark moved back a few days. WHOOP scores records after it first lists them
     (a sleep appears PENDING, a day's strain keeps growing until the cycle closes), so the
     recent ones are read again; upserts make that harmless."""
+    if not since:
+        return since
     try:
         t = calendar.timegm(time.strptime(since[:19], "%Y-%m-%dT%H:%M:%S"))
     except ValueError:
@@ -131,78 +146,81 @@ def _overlap(since):
 
 def sync():
     c = db.connect()
-    newest = db.get_state(c, "api_since", "2020-01-01T00:00:00.000Z")
-    since = _overlap(newest)
-    counts = {}
-    # Sleep
-    for s in paged("/v2/activity/sleep", since):
-        st = _g(s, "score", "stage_summary")
-        db.upsert(c, "api_sleep", {
-            "id": str(s["id"]), "start": s.get("start"), "end": s.get("end"),
-            "nap": int(bool(s.get("nap"))),
-            "resp_rate": _g(s, "score", "respiratory_rate"),
-            "sleep_perf": _g(s, "score", "sleep_performance_percentage"),
-            "sleep_consistency": _g(s, "score", "sleep_consistency_percentage"),
-            "sleep_efficiency": _g(s, "score", "sleep_efficiency_percentage"),
-            "total_in_bed_ms": _g(st, "total_in_bed_time_milli"),
-            "total_awake_ms": _g(st, "total_awake_time_milli"),
-            "total_light_ms": _g(st, "total_light_sleep_time_milli"),
-            "total_sws_ms": _g(st, "total_slow_wave_sleep_time_milli"),
-            "total_rem_ms": _g(st, "total_rem_sleep_time_milli"),
-            "disturbances": _g(st, "disturbance_count"),
-            "raw": json.dumps(s)})
-        newest = max(newest, s.get("end") or newest); counts["sleep"]=counts.get("sleep",0)+1
-    # Recovery
-    for rv in paged("/v2/recovery", since):
-        db.upsert(c, "api_recovery", {
-            "cycle_id": rv.get("cycle_id"), "sleep_id": str(rv["sleep_id"]) if rv.get("sleep_id") is not None else None,
-            "created_at": rv.get("created_at"), "score_state": rv.get("score_state"),
-            "recovery_score": _g(rv, "score", "recovery_score"),
-            "resting_hr": _g(rv, "score", "resting_heart_rate"),
-            "hrv_rmssd_ms": _g(rv, "score", "hrv_rmssd_milli"),
-            "spo2": _g(rv, "score", "spo2_percentage"),
-            "skin_temp_c": _g(rv, "score", "skin_temp_celsius"),
-            "raw": json.dumps(rv)})
-        counts["recovery"]=counts.get("recovery",0)+1
-    # Cycle
-    for cy in paged("/v2/cycle", since):
-        db.upsert(c, "api_cycle", {
-            "id": cy.get("id"), "start": cy.get("start"), "end": cy.get("end"),
-            "score_state": cy.get("score_state"),
-            "strain": _g(cy, "score", "strain"),
-            "avg_hr": _g(cy, "score", "average_heart_rate"),
-            "max_hr": _g(cy, "score", "max_heart_rate"),
-            "kilojoule": _g(cy, "score", "kilojoule"), "raw": json.dumps(cy)})
-        counts["cycle"]=counts.get("cycle",0)+1
-    # Workout
-    for w in paged("/v2/activity/workout", since):
-        db.upsert(c, "api_workout", {
-            "id": str(w.get("id")), "start": w.get("start"), "end": w.get("end"),
-            "sport_name": w.get("sport_name") or str(w.get("sport_id")),
-            "score_state": w.get("score_state"),
-            "strain": _g(w, "score", "strain"),
-            "avg_hr": _g(w, "score", "average_heart_rate"),
-            "max_hr": _g(w, "score", "max_heart_rate"),
-            "kilojoule": _g(w, "score", "kilojoule"),
-            "distance_m": _g(w, "score", "distance_meter"),
-            "zone_raw": json.dumps(_g(w, "score", "zone_durations") or {}),
-            "raw": json.dumps(w)})
-        counts["workout"]=counts.get("workout",0)+1
-    # Profile
     try:
-        p = get("/v2/user/profile/basic")
-        for k, v in p.items():
-            db.upsert(c, "api_profile", {"key": k, "value": str(v)})
-    except Exception as ex:
-        print("profile:", ex)
-    # Body measurements: WHOOP's max heart rate for you (learn.py uses it for "heart rate up")
-    try:
-        for k, v in get("/v2/user/measurement/body").items():
-            db.upsert(c, "api_profile", {"key": k, "value": str(v)})
-    except Exception as ex:
-        print("body measurement:", ex)
-    db.set_state(c, "api_since", newest); c.commit()
-    print("API sync complete:", counts, "| watermark:", newest)
+        newest = db.get_state(c, "api_since") or "2020-01-01T00:00:00.000Z"
+        since = _overlap(newest)
+        counts = {}
+        # Sleep
+        for s in paged("/v2/activity/sleep", since):
+            st = _g(s, "score", "stage_summary")
+            db.upsert(c, "api_sleep", {
+                "id": str(s["id"]), "start": s.get("start"), "end": s.get("end"),
+                "nap": int(bool(s.get("nap"))),
+                "resp_rate": _g(s, "score", "respiratory_rate"),
+                "sleep_perf": _g(s, "score", "sleep_performance_percentage"),
+                "sleep_consistency": _g(s, "score", "sleep_consistency_percentage"),
+                "sleep_efficiency": _g(s, "score", "sleep_efficiency_percentage"),
+                "total_in_bed_ms": _g(st, "total_in_bed_time_milli"),
+                "total_awake_ms": _g(st, "total_awake_time_milli"),
+                "total_light_ms": _g(st, "total_light_sleep_time_milli"),
+                "total_sws_ms": _g(st, "total_slow_wave_sleep_time_milli"),
+                "total_rem_ms": _g(st, "total_rem_sleep_time_milli"),
+                "disturbances": _g(st, "disturbance_count"),
+                "raw": json.dumps(s)})
+            newest = max(newest, s.get("end") or newest); counts["sleep"]=counts.get("sleep",0)+1
+        # Recovery
+        for rv in paged("/v2/recovery", since):
+            db.upsert(c, "api_recovery", {
+                "cycle_id": rv.get("cycle_id"), "sleep_id": str(rv["sleep_id"]) if rv.get("sleep_id") is not None else None,
+                "created_at": rv.get("created_at"), "score_state": rv.get("score_state"),
+                "recovery_score": _g(rv, "score", "recovery_score"),
+                "resting_hr": _g(rv, "score", "resting_heart_rate"),
+                "hrv_rmssd_ms": _g(rv, "score", "hrv_rmssd_milli"),
+                "spo2": _g(rv, "score", "spo2_percentage"),
+                "skin_temp_c": _g(rv, "score", "skin_temp_celsius"),
+                "raw": json.dumps(rv)})
+            counts["recovery"]=counts.get("recovery",0)+1
+        # Cycle
+        for cy in paged("/v2/cycle", since):
+            db.upsert(c, "api_cycle", {
+                "id": cy.get("id"), "start": cy.get("start"), "end": cy.get("end"),
+                "score_state": cy.get("score_state"),
+                "strain": _g(cy, "score", "strain"),
+                "avg_hr": _g(cy, "score", "average_heart_rate"),
+                "max_hr": _g(cy, "score", "max_heart_rate"),
+                "kilojoule": _g(cy, "score", "kilojoule"), "raw": json.dumps(cy)})
+            counts["cycle"]=counts.get("cycle",0)+1
+        # Workout
+        for w in paged("/v2/activity/workout", since):
+            db.upsert(c, "api_workout", {
+                "id": str(w.get("id")), "start": w.get("start"), "end": w.get("end"),
+                "sport_name": w.get("sport_name") or str(w.get("sport_id")),
+                "score_state": w.get("score_state"),
+                "strain": _g(w, "score", "strain"),
+                "avg_hr": _g(w, "score", "average_heart_rate"),
+                "max_hr": _g(w, "score", "max_heart_rate"),
+                "kilojoule": _g(w, "score", "kilojoule"),
+                "distance_m": _g(w, "score", "distance_meter"),
+                "zone_raw": json.dumps(_g(w, "score", "zone_durations") or {}),
+                "raw": json.dumps(w)})
+            counts["workout"]=counts.get("workout",0)+1
+        # Profile
+        try:
+            p = get("/v2/user/profile/basic")
+            for k, v in p.items():
+                db.upsert(c, "api_profile", {"key": k, "value": str(v)})
+        except Exception as ex:
+            print("profile:", ex)
+        # Body measurements: WHOOP's max heart rate for you (learn.py uses it for "heart rate up")
+        try:
+            for k, v in get("/v2/user/measurement/body").items():
+                db.upsert(c, "api_profile", {"key": k, "value": str(v)})
+        except Exception as ex:
+            print("body measurement:", ex)
+        db.set_state(c, "api_since", newest); c.commit()
+        print("API sync complete:", counts, "| watermark:", newest)
+    finally:
+        c.close()
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "sync"

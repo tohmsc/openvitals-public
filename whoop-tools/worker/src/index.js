@@ -26,7 +26,8 @@ function safeEqual(a, b) {
 }
 function readCookie(req, name) {
   const m = (req.headers.get("cookie") || "").match(new RegExp(`(?:^|; )${name}=([^;]+)`));
-  return m ? decodeURIComponent(m[1]) : null;
+  if (!m) return null;
+  try { return decodeURIComponent(m[1]); } catch { return null; }
 }
 async function authed(req, env) {
   const v = readCookie(req, COOKIE);
@@ -201,7 +202,22 @@ async function ensureSchema(env) {
     env.DB.prepare("CREATE TABLE IF NOT EXISTS estimates (date TEXT, kind TEXT, version TEXT, value REAL, ok INTEGER, why TEXT, row TEXT, inputs TEXT, computed_at REAL, PRIMARY KEY (date, kind, version))"),
     // stress monitor windows, pushed by cloud_sync.py (stress.py on the Mac)
     env.DB.prepare("CREATE TABLE IF NOT EXISTS stress (ts REAL PRIMARY KEY, date TEXT, state TEXT, score REAL, hr REAL, rmssd REAL, n_rr INTEGER, move REAL, computed_at REAL)"),
+    // the tables /api/summary and /api/live read (same as SCHEMA in cloud_sync.py), so a new
+    // database answers with empty data before the Mac's first push instead of an error
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS api_recovery (cycle_id INTEGER PRIMARY KEY, sleep_id TEXT, created_at TEXT, score_state TEXT, recovery_score REAL, resting_hr REAL, hrv_rmssd_ms REAL, spo2 REAL, skin_temp_c REAL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS api_sleep (id TEXT PRIMARY KEY, start TEXT, end TEXT, nap INTEGER, resp_rate REAL, sleep_perf REAL, sleep_consistency REAL, sleep_efficiency REAL, total_in_bed_ms INTEGER, total_awake_ms INTEGER, total_light_ms INTEGER, total_sws_ms INTEGER, total_rem_ms INTEGER, disturbances INTEGER)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS api_cycle (id INTEGER PRIMARY KEY, start TEXT, end TEXT, score_state TEXT, strain REAL, avg_hr REAL, max_hr REAL, kilojoule REAL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS api_workout (id TEXT PRIMARY KEY, start TEXT, end TEXT, sport_name TEXT, score_state TEXT, strain REAL, avg_hr REAL, max_hr REAL, kilojoule REAL, distance_m REAL, zone_raw TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS api_profile (key TEXT PRIMARY KEY, value TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS ble_hr (ts REAL PRIMARY KEY, hr INTEGER, rr_ms TEXT)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS device_soc (rtc INTEGER PRIMARY KEY, soc_pct REAL, subsystem TEXT, seen REAL)"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS device_logs (rtc INTEGER, subsystem TEXT, message TEXT, seq INTEGER, PRIMARY KEY (rtc, subsystem, message))"),
+    env.DB.prepare("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"),
   ]);
+  // order columns added later (cloud_sync.py adds them too); each fails when it is already there
+  for (const q of ["ALTER TABLE device_soc ADD COLUMN seen REAL", "ALTER TABLE device_logs ADD COLUMN seq INTEGER"]) {
+    try { await env.DB.prepare(q).run(); } catch { /* already added */ }
+  }
   schemaReady = true;
 }
 async function passkeyCount(env) {
@@ -215,6 +231,7 @@ async function newChallenge(env, purpose) {
   return b64u.enc(enc.encode(`${body}.${await sign(env.SESSION_SECRET, body)}`));
 }
 async function useChallenge(env, purpose, challenge) {
+  if (typeof challenge !== "string" || !env.SESSION_SECRET) return false;
   const parts = new TextDecoder().decode(b64u.dec(challenge)).split(".");
   if (parts.length !== 4) return false;
   const [p, exp, nonce, sig] = parts;
@@ -245,14 +262,17 @@ async function checkCeremony(env, url, type, purpose, clientDataB64, authDataB64
 
 // WebAuthn ECDSA signatures are DER; WebCrypto wants raw r||s.
 function derToRaw(der) {
+  if (der.length < 8 || der[0] !== 0x30) throw new Error("bad der");
   let i = 2;
   if (der[1] & 0x80) i = 2 + (der[1] & 0x7f);
   const part = () => {
-    i++; // 0x02
+    if (i + 2 > der.length || der[i++] !== 0x02) throw new Error("bad der");
     const len = der[i++];
+    if (i + len > der.length) throw new Error("bad der");
     let x = der.slice(i, i + len);
     i += len;
     while (x.length > 32 && x[0] === 0) x = x.slice(1);
+    if (x.length > 32) throw new Error("bad der");
     const out = new Uint8Array(32);
     out.set(x, 32 - x.length);
     return out;
@@ -265,11 +285,11 @@ function derToRaw(der) {
 
 async function registerOptions(env, url) {
   await ensureSchema(env);
-  const [name, existing] = await env.DB.batch([
-    env.DB.prepare("SELECT value FROM api_profile WHERE key='first_name'"),
-    env.DB.prepare("SELECT id FROM passkeys"),
-  ]);
-  const who = name.results[0]?.value || "Vitals";
+  let who = "Vitals";
+  try {
+    who = (await env.DB.prepare("SELECT value FROM api_profile WHERE key='first_name'").first("value")) || "Vitals";
+  } catch { /* api_profile not synced yet */ }
+  const existing = await env.DB.prepare("SELECT id FROM passkeys").all();
   return {
     challenge: await newChallenge(env, "reg"),
     rp: { name: "Vitals", id: url.hostname },
@@ -312,7 +332,8 @@ async function verifyLogin(env, url, body) {
 }
 
 async function summary(env, url) {
-  const since = Number(url.searchParams.get("since")) || Date.now() / 1000 - 86400;
+  const rawSince = Number(url.searchParams.get("since"));
+  const since = Number.isFinite(rawSince) && rawSince > 0 ? rawSince : Date.now() / 1000 - 86400;
   const DB = env.DB;
   await ensureSchema(env);
   const [profile, recovery, sleep, cycle, workout, soc, logs, meta, today, arch, est] = await DB.batch([
@@ -321,13 +342,15 @@ async function summary(env, url) {
     DB.prepare("SELECT start,end,sleep_perf,sleep_efficiency,sleep_consistency,resp_rate,total_in_bed_ms,total_rem_ms,total_sws_ms,total_light_ms,total_awake_ms,disturbances FROM api_sleep WHERE COALESCE(nap,0)=0 AND total_in_bed_ms IS NOT NULL ORDER BY start DESC LIMIT ?").bind(HISTORY),
     DB.prepare("SELECT start,end,strain,avg_hr,max_hr,kilojoule FROM api_cycle WHERE strain IS NOT NULL ORDER BY start DESC LIMIT ?").bind(HISTORY),
     DB.prepare("SELECT start,end,sport_name,strain,avg_hr,max_hr,kilojoule,distance_m,zone_raw FROM api_workout ORDER BY start DESC LIMIT ?").bind(HISTORY),
-    DB.prepare("SELECT rtc,soc_pct FROM device_soc ORDER BY rtc"),
-    DB.prepare("SELECT rtc,subsystem,message FROM device_logs ORDER BY rtc DESC LIMIT 60"),
+    // the strap's clock restarts after a reboot: order by when the Mac saw the row
+    DB.prepare("SELECT rtc,soc_pct FROM device_soc ORDER BY COALESCE(seen, 0), rtc"),
+    DB.prepare("SELECT rtc,subsystem,message FROM device_logs ORDER BY COALESCE(seq, 0) DESC, rtc DESC LIMIT 60"),
     DB.prepare("SELECT key,value FROM meta"),
     DB.prepare("SELECT ts,hr,rr_ms FROM ble_hr WHERE ts >= ? AND hr > 0 ORDER BY ts LIMIT 50000").bind(since),
     DB.prepare("SELECT MIN(created_at) a, MAX(created_at) b FROM api_recovery"),
     // only the estimates that passed their checks, of the version the Mac says is current
-    DB.prepare("SELECT date, kind, version, ok, why, row, inputs FROM estimates WHERE version = (SELECT value FROM meta WHERE key = 'scores_version') AND (ok = 1 OR date >= date('now', '-14 days')) ORDER BY date DESC LIMIT ?").bind(HISTORY),
+    // HISTORY days of each kind; the held-back ones of the last two weeks don't count against it
+    DB.prepare("SELECT date, kind, version, ok, why, row, inputs FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY kind, ok ORDER BY date DESC) rn FROM estimates WHERE version = (SELECT value FROM meta WHERE key = 'scores_version') AND (ok = 1 OR date >= date('now', '-14 days'))) WHERE ok = 0 OR rn <= ? ORDER BY date DESC").bind(HISTORY),
   ]);
   const m = Object.fromEntries(meta.results.map((r) => [r.key, r.value]));
   // how you slept (sleep.py on the Mac); the table appears with the first push that has a night
@@ -422,6 +445,7 @@ function stressFor(rows, baseline, t) {
 }
 
 async function live(env) {
+  await ensureSchema(env);
   const [meta, recent] = await env.DB.batch([
     env.DB.prepare("SELECT value FROM meta WHERE key='live_hr_now'"),
     env.DB.prepare("SELECT ts,hr FROM ble_hr ORDER BY ts DESC LIMIT 120"),
@@ -442,9 +466,14 @@ export default {
 
     if (path === "/login") {
       if (req.method === "POST") {
-        const form = await req.formData();
-        const pw = String(form.get("password") || "");
-        if (env.DASH_PASSWORD && safeEqual(await sign("pw", pw), await sign("pw", env.DASH_PASSWORD))) {
+        let pw = "";
+        try {
+          const form = await req.formData();
+          pw = String(form.get("password") || "");
+        } catch {
+          return html(LOGIN("Invalid sign-in request.", (await passkeyCount(env)) > 0), 400);
+        }
+        if (env.DASH_PASSWORD && env.SESSION_SECRET && safeEqual(await sign("pw", pw), await sign("pw", env.DASH_PASSWORD))) {
           return startSession(env, "/passkey"); // offer a passkey; the page skips itself if this device has one
         }
         await new Promise((r) => setTimeout(r, 600)); // slow down guessing
@@ -454,6 +483,7 @@ export default {
       return html(LOGIN("", (await passkeyCount(env)) > 0));
     }
     if (path === "/passkey/login/options" && req.method === "POST") {
+      if (!env.SESSION_SECRET) return json({ error: "not configured" }, 500);
       await ensureSchema(env);
       return json({ challenge: await newChallenge(env, "auth"), rpId: url.hostname });
     }

@@ -554,6 +554,21 @@ class DaemonTest(unittest.TestCase):
         self.assertIsNone(collector.lock_holder())
         self.assertFalse(os.path.exists(daemon.LOCK))
 
+    def test_a_command_that_only_mentions_the_script_is_not_a_streamer(self):
+        import subprocess, sys, tempfile
+        d = tempfile.mkdtemp()
+        script = os.path.join(d, "daemon.py")
+        with open(script, "w") as f:
+            f.write("import time\ntime.sleep(30)\n")
+        other = subprocess.Popen(["sh", "-c", "sleep 30 # daemon.py"])
+        ours = subprocess.Popen([sys.executable, script])
+        try:
+            self.assertFalse(collector.is_streamer(other.pid))
+            self.assertTrue(collector.is_streamer(ours.pid))
+        finally:
+            for p in (other, ours):
+                p.kill(); p.wait()
+
     def test_stale_lock_is_cleared(self):
         child = os.fork()
         if child == 0:
@@ -820,6 +835,41 @@ class BatteryTest(unittest.TestCase):
         asyncio.run(run_for(d, 0.3))
         self.assertEqual(len(FakeStrap.made), 1)            # one link, never dropped
         self.assertEqual(metrics.battery(db.connect()), 88.5)
+
+
+class DaemonRobustnessTest(unittest.TestCase):
+    def setUp(self):
+        FakeStrap.made = []
+        c = db.connect()
+        for t in ("ble_hr", "ble_raw", "clock_sync", "sync_state", "host_log", "strap_cmd"):
+            c.execute(f"DELETE FROM {t}")
+        c.commit()
+        c.close()
+
+    def test_drain_ble_error_propagates_and_reconnects(self):
+        calls = [0]
+
+        class FailFirstDrain(FakeStrap):
+            async def drain(self, timeout=90):
+                calls[0] += 1
+                if calls[0] == 1:
+                    raise TimeoutError("BLE write timed out")
+                return await super().drain(timeout=timeout)
+
+        d = make()
+        d.strap = FailFirstDrain
+        asyncio.run(run_for(d, 0.25))
+        self.assertGreaterEqual(len(FakeStrap.made), 2)     # first link dropped on drain error, reconnected
+
+    def test_corrupt_housekeeping_timestamp_does_not_disable_job(self):
+        c = db.connect()
+        db.set_state(c, "daemon_last_ping", "not-a-float")
+        c.close()
+        ran = []
+        d = make(do_drain=False)
+        d.jobs = [("ping", 3600, lambda: ran.append(1) or True)]
+        asyncio.run(run_for(d, 0.2))
+        self.assertEqual(ran, [1])
 
 
 if __name__ == "__main__":

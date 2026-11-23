@@ -10,9 +10,6 @@ Usage: whoop_client.py [BLE_ADDRESS] [SECONDS]
 import asyncio, sys, time, csv, datetime as dt
 from bleak import BleakClient, BleakScanner
 
-ADDR = sys.argv[1] if len(sys.argv) > 1 else None
-DURATION = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
-
 WHOOP_SVC = "61080001-8d6d-82b8-614a-1c8cb0f8dcc6"
 BASE = "6108{:04x}-8d6d-82b8-614a-1c8cb0f8dcc6"
 CMD_CHAR  = BASE.format(2)
@@ -22,9 +19,13 @@ HR_ON     = bytes.fromhex("aa0800a823080e016c935474")  # community "broadcast HR
 
 def parse_hr(data: bytes):
     """Return (hr_bpm, [rr_ms,...]) from a 0x2A37 Heart Rate Measurement."""
+    if len(data) < 2:
+        return None, []
     flags = data[0]
     i = 1
     if flags & 0x01:                      # 16-bit HR
+        if len(data) < 3:
+            return None, []
         hr = int.from_bytes(data[i:i+2], "little"); i += 2
     else:
         hr = data[i]; i += 1
@@ -45,39 +46,43 @@ async def find_whoop():
         print("found:", dev.address)
     return dev.address if dev else None
 
-async def main():
-    addr = ADDR or await find_whoop()
+async def main(addr=None, duration=120.0):
+    addr = addr or await find_whoop()
     if not addr:
         print("WHOOP not found. Make sure the phone app is closed (one bond at a time).")
         return
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    hr_f = open(f"whoop-tools/hr_{stamp}.csv", "w", newline="")
-    raw_f = open(f"whoop-tools/raw_{stamp}.log", "w")
-    hr_w = csv.writer(hr_f); hr_w.writerow(["iso_time", "hr_bpm", "rr_ms"])
-    t0 = time.time()
+    with open(f"whoop-tools/hr_{stamp}.csv", "w", newline="") as hr_f, \
+         open(f"whoop-tools/raw_{stamp}.log", "w") as raw_f:
+        hr_w = csv.writer(hr_f); hr_w.writerow(["iso_time", "hr_bpm", "rr_ms"])
+        t0 = time.time()
 
-    async with BleakClient(addr, timeout=20.0) as c:
-        print("connected:", c.is_connected)
+        async with BleakClient(addr, timeout=20.0) as c:
+            print("connected:", c.is_connected)
 
-        def on_hr(_, data):
-            hr, rr = parse_hr(data)
-            iso = dt.datetime.now().isoformat()
-            hr_w.writerow([iso, hr, " ".join(map(str, rr))]); hr_f.flush()
-            print(f"HR {hr:3d} bpm   RR {rr}")
+            def on_hr(_, data):
+                hr, rr = parse_hr(data)
+                if hr is None:
+                    return
+                iso = dt.datetime.now().isoformat()
+                hr_w.writerow([iso, hr, " ".join(map(str, rr))]); hr_f.flush()
+                print(f"HR {hr:3d} bpm   RR {rr}")
 
-        def on_raw(uuid, data):
-            line = f"{time.time()-t0:8.3f} {uuid[4:8]} {data.hex(' ')}"
-            raw_f.write(line + "\n"); raw_f.flush()
-            print(line)
+            def on_raw(uuid, data):
+                line = f"{time.time()-t0:8.3f} {uuid[4:8]} {data.hex(' ')}"
+                raw_f.write(line + "\n"); raw_f.flush()
+                print(line)
 
-        for u in NOTIFY:
-            await c.start_notify(u, lambda _, d, u=u: on_raw(u, d))
-        await c.start_notify(HR_CHAR, on_hr)
-        await c.write_gatt_char(CMD_CHAR, HR_ON, response=False)
-        print(f"recording {DURATION:.0f}s -> hr_{stamp}.csv / raw_{stamp}.log")
-        await asyncio.sleep(DURATION)
+            for u in NOTIFY:
+                await c.start_notify(u, lambda _, d, u=u: on_raw(u, d))
+            await c.start_notify(HR_CHAR, on_hr)
+            await c.write_gatt_char(CMD_CHAR, HR_ON, response=False)
+            print(f"recording {duration:.0f}s -> hr_{stamp}.csv / raw_{stamp}.log")
+            await asyncio.sleep(duration)
 
-    hr_f.close(); raw_f.close()
     print("saved.")
 
-asyncio.run(main())
+if __name__ == "__main__":
+    addr = sys.argv[1] if len(sys.argv) > 1 else None
+    duration = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
+    asyncio.run(main(addr, duration))

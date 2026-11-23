@@ -106,7 +106,7 @@ def rate_kcal_min(hr, rest, top, body, age, m):
     """Energy rate (kcal/min) at heart rate `hr` (None: not recorded, counts as resting)."""
     base = bmr_kcal_day(body["sex"], body["weight_kg"], body["height_cm"], age) / 1440
     rest_rate = m["rest_factor"] * base
-    if hr is None or (hr - rest) / (top - rest) < m["threshold_hrr"]:
+    if hr is None or top <= rest or (hr - rest) / (top - rest) < m["threshold_hrr"]:
         return rest_rate, 0.0
     extra = max(0.0, keytel_kcal_min(body["sex"], hr, body["weight_kg"], age) - base)
     return rest_rate, m["active_scale"] * extra
@@ -115,6 +115,8 @@ def rate_kcal_min(hr, rest, top, body, age, m):
 def energy(c, a, b, rest, top, body, age, m):
     """Energy for [a, b) from ble_hr: total, resting and active kcal, and recorded seconds.
     Seconds further than a minute apart are a gap (counted at the resting rate)."""
+    if b <= a:
+        return {"kcal": 0.0, "resting_kcal": 0.0, "active_kcal": 0.0, "recorded_s": 0.0}
     rest_rate, _ = rate_kcal_min(None, rest, top, body, age, m)
     active, rec, prev = 0.0, 0.0, None
     cache = {}
@@ -148,6 +150,13 @@ def for_day(c, date, a, b, rest, top, ongoing, m, gate):
 # ---------------- command line ----------------
 def _main(args):
     c = db.connect()
+    try:
+        return _main_with_db(c, args)
+    finally:
+        c.close()
+
+
+def _main_with_db(c, args):
     if args[:1] == ["set"] and len(args) == 3:
         try:
             k, v = set_profile(c, args[1], args[2])

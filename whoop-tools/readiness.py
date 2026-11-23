@@ -33,7 +33,7 @@ training load. This is pattern-matching on your own numbers, not medical advice.
     python readiness.py [YYYY-MM-DD]
 """
 import json, math, statistics, sys, time
-import db, learn
+import db, learn, scores
 
 VERSION = "r1"
 MIN_BASELINE = 7          # own nights before hrv / rhr / resp are compared at all
@@ -67,9 +67,10 @@ def _signal(key, label, value, usual, unit, flag, detail, **extra):
 def _estimates(c, kind, start, end):
     if not c.execute("SELECT 1 FROM sqlite_master WHERE name='estimates'").fetchone():
         return {}
+    # the model the app shows (scores.current); an older or trial version's rows don't count
     out = {}
-    for r in c.execute("SELECT date, value, row FROM estimates WHERE kind=? AND ok=1 AND date>=? AND date<=? "
-                       "ORDER BY date, computed_at", (kind, start, end)):
+    for r in c.execute("SELECT date, value, row FROM estimates WHERE kind=? AND version=? AND ok=1 AND date>=? "
+                       "AND date<=? ORDER BY date, computed_at", (kind, scores.current(c), start, end)):
         out[r["date"]] = r
     return out
 
@@ -79,7 +80,7 @@ def night_signals(c, today, u):
     night = c.execute("SELECT rhr, hrv, n_rr FROM daily_night WHERE date=?", (today,)).fetchone()
     own = u.get("source") == "own" and u.get("nights", 0) >= MIN_BASELINE
     if night and own:
-        if night["hrv"] and u.get("hrv") and (night["n_rr"] is None or night["n_rr"] >= learn.MIN_RR):
+        if night["hrv"] and night["hrv"] > 0 and u.get("hrv") and u["hrv"] > 0 and (night["n_rr"] is None or night["n_rr"] >= learn.MIN_RR):
             z = math.log(night["hrv"] / u["hrv"]) / u["hrv_spread"]
             f = _flag(z)
             sig.append(_signal("hrv", "HRV", round(night["hrv"]), round(u["hrv"]), "ms", f, TEXT["hrv"][f], z=round(z, 2)))
@@ -180,13 +181,17 @@ def evaluate(c, today=None):
     have = (u.get("source") == "own" and u.get("nights", 0) >= MIN_BASELINE) or acwr is not None
     level, headline, summary = synthesize(signals, have)
     return {"date": today, "version": VERSION, "level": level, "headline": headline, "summary": summary,
-            "signals": signals, "acwr": round(acwr, 2) if acwr else None,
+            "signals": signals, "acwr": round(acwr, 2) if acwr is not None else None,
             "baseline_nights": u.get("nights", 0), "needs_nights": MIN_BASELINE,
             "alerts": [a.get("key") for a in on]}
 
 
 if __name__ == "__main__":
-    r = evaluate(db.connect(), sys.argv[1] if len(sys.argv) > 1 else None)
+    c = db.connect()
+    try:
+        r = evaluate(c, sys.argv[1] if len(sys.argv) > 1 else None)
+    finally:
+        c.close()
     print(f"{r['date']}  {r['headline']}: {r['summary']}")
     for s in r["signals"]:
         print(f"  {s['flag']:>7}  {s['label']}: {s['value']} {s['unit']} (usual {s['usual']}) - {s['detail']}")

@@ -154,6 +154,31 @@ class ArchiveTest(unittest.TestCase):
         decode.run(quiet=True)
         self.assertEqual(int(db.get_state(self.c, "decode_rowid")), mark + 3)   # picked up, not skipped
 
+    def test_negative_timestamp_does_not_crash_archive(self):
+        self.c.execute("INSERT INTO ble_raw(ts,channel,ptype,hex) VALUES(?,?,?,?)", (-100, "0005", 0x2F, "00000001"))
+        fill(self.c, 0, 2, 10)
+        self.decoded_all()
+        self.assertEqual(archive.run(self.store, keep_hours=24, quiet=True), 0)
+
+    def test_backup_prune_zero_and_import_data_nonfinite(self):
+        import backup, import_data
+        bk_dir = tempfile.mkdtemp(dir=_TMP)
+        orig_bk = backup.BK
+        try:
+            backup.BK = bk_dir
+            open(os.path.join(bk_dir, "whoop-20261119-010203.db"), "w").close()
+            backup.prune(keep=0)
+            self.assertEqual(os.listdir(bk_dir), [])
+        finally:
+            backup.BK = orig_bk
+        for bad in ("nan", "inf", "-inf"):
+            with self.assertRaises(ValueError):
+                import_data.num(bad, float)
+            with self.assertRaises(ValueError):
+                import_data.num(bad, int)
+        with self.assertRaises(ValueError):
+            import_data.hr_rows({"timestamp": "2026-11-19T10:00:00Z", "hr": ""})
+
 
 if __name__ == "__main__":
     unittest.main()

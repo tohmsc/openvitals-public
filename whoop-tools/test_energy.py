@@ -136,6 +136,14 @@ class Hook(Base):
         self.assertNotIn("energy", scores.MODELS["v1"])
         self.assertEqual(scores.MODELS["v1"]["strain"]["max_hr"], 197.0)
 
+    def test_degenerate_hr_range_and_empty_span_do_not_crash(self):
+        body = {"sex": "male", "weight_kg": 75.0, "height_cm": 180.0, "birth_year": 1995}
+        rest_r, active_r = energy.rate_kcal_min(80, rest=100, top=100, body=body, age=31, m=scores.ENERGY_V1)
+        self.assertGreater(rest_r, 0)
+        self.assertEqual(active_r, 0.0)
+        res = energy.energy(self.c, 2000, 1000, 50, 190, body, 31, scores.ENERGY_V1)
+        self.assertEqual(res["kcal"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

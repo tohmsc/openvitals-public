@@ -41,7 +41,7 @@ Run:  python telegram_report.py              # send the morning message now
 Privacy: this sends a health summary to Telegram's servers (bot chats are not end-to-end
 encrypted). Only these short messages are sent, never raw data.
 """
-import json, os, secrets, sys, time
+import json, secrets, sys, time
 import requests
 import alerts, config, db, learn, metrics, sleep
 from metrics import day_stats, night_stats, day_bounds, battery      # noqa: F401 (also used by tests)
@@ -249,10 +249,13 @@ def status_text(c, e=None):
         live = json.loads(db.get_state(c, "live_hr_now", "{}") or "{}")
     except ValueError:
         live = {}
+    if not isinstance(live, dict):
+        live = {}
     age = last_seen(c)
-    if live.get("hr") and time.time() - live.get("ts", 0) < 20:
+    live_ts = live.get("ts")
+    if live.get("hr") and live_ts is not None and time.time() - live_ts < 20:
         lines.append(f"Strap connected, heart rate {live['hr']} right now.")
-    elif live.get("hr") == 0 and time.time() - live.get("ts", 0) < 20:
+    elif live.get("hr") == 0 and live_ts is not None and time.time() - live_ts < 20:
         lines.append("Strap connected, but it's not on your wrist.")
     elif age is None:
         lines.append("Strap never seen yet.")
@@ -425,9 +428,13 @@ def night_is_in(c, now):
     night. After a night with the laptop asleep that takes a few minutes from waking: the strap
     reconnects, hands over what it stored, and decode.py turns it into heart rate."""
     seen = db.get_state(c, "history_ts")
-    if seen is None:                    # history was never drained here (--no-drain): nothing to wait for
+    if not seen:                        # history was never drained here (--no-drain): nothing to wait for
         return True
-    return float(seen) >= day_bounds(0, now)[0] + learn.night_window(c)[1] * 3600
+    try:
+        seen_ts = float(seen)
+    except ValueError:
+        return True
+    return seen_ts >= day_bounds(0, now)[0] + learn.night_window(c)[1] * 3600
 
 
 def report_ready(c, today, now):
@@ -441,7 +448,11 @@ def report_ready(c, today, now):
     if day != today:
         db.set_state(c, "telegram_report_waiting", f"{today}|{now}")
         return False
-    return now - float(since) >= REPORT_GRACE
+    try:
+        return now - float(since) >= REPORT_GRACE
+    except ValueError:
+        db.set_state(c, "telegram_report_waiting", f"{today}|{now}")
+        return False
 
 
 def awake_for():
@@ -460,24 +471,27 @@ def run_due(api=call, now=None, uptime=None):
     if not token:
         return None
     c = db.connect()
-    up = awake_for() if uptime is None else uptime      # before anything can return early
-    chat = e.get("TELEGRAM_CHAT_ID")
-    if not chat:
-        return "paired" if try_pair(c, token, api) else None
-    did = "replied" if answer_commands(c, token, chat, e, api) else None
-    now = now or time.time()
-    lt = time.localtime(now)
-    hour = int(e.get("TELEGRAM_DAILY_HOUR") or 8)
-    if not hour <= lt.tm_hour < 22:                     # quiet hours: nothing unprompted at night
+    try:
+        up = awake_for() if uptime is None else uptime      # before anything can return early
+        chat = e.get("TELEGRAM_CHAT_ID")
+        if not chat:
+            return "paired" if try_pair(c, token, api) else None
+        did = "replied" if answer_commands(c, token, chat, e, api) else None
+        now = now or time.time()
+        lt = time.localtime(now)
+        hour = int(e.get("TELEGRAM_DAILY_HOUR") or 8)
+        if not hour <= lt.tm_hour < 22:                     # quiet hours: nothing unprompted at night
+            return did
+        if send_nudges(c, token, chat, e, api, up):
+            did = "nudged"
+        today = time.strftime("%Y-%m-%d", lt)
+        if db.get_state(c, "telegram_last_report") != today and report_ready(c, today, now):
+            send_report(c, token, chat, -1, "Yesterday", api, now, ask=True)
+            db.set_state(c, "telegram_last_report", today)  # only after a successful send
+            did = "sent"
         return did
-    if send_nudges(c, token, chat, e, api, up):
-        did = "nudged"
-    today = time.strftime("%Y-%m-%d", lt)
-    if db.get_state(c, "telegram_last_report") != today and report_ready(c, today, now):
-        send_report(c, token, chat, -1, "Yesterday", api, now, ask=True)
-        db.set_state(c, "telegram_last_report", today)  # only after a successful send
-        did = "sent"
-    return did
+    finally:
+        c.close()
 
 
 if __name__ == "__main__":
