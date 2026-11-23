@@ -159,6 +159,19 @@ class DecodeTest(unittest.TestCase):
         second = self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone()
         self.assertEqual((first["n"], first["move_sum"]), (second["n"], second["move_sum"]))
 
+    def test_counts_doubled_by_an_older_version_are_rebuilt_once(self):
+        self.load([rec(i, accel=(0.0, 0.0, 1.0 + 0.02 * (i % 2))) for i in range(60)])
+        decode.run(quiet=True)
+        right = tuple(self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone())
+        # what the old backfill left behind: every minute added a second time
+        self.c.execute("UPDATE motion_min SET n = n * 2, move_sum = move_sum * 2")
+        self.c.execute("DELETE FROM sync_state WHERE key = 'motion_recounted'"); self.c.commit()
+        decode.run(quiet=True)
+        self.assertEqual(tuple(self.c.execute("SELECT n, move_sum FROM motion_min WHERE minute=?", (T,)).fetchone()), right)
+        self.c.execute("UPDATE motion_min SET n = 999"); self.c.commit()
+        decode.run(quiet=True)                                # only once
+        self.assertEqual(self.c.execute("SELECT n FROM motion_min WHERE minute=?", (T,)).fetchone()["n"], 999)
+
     def test_bad_hex_row_does_not_stall_decode(self):
         self.c.execute("INSERT INTO ble_raw(ts,channel,ptype,hex) VALUES(?,?,?,?)", (T, "0005", 0x2F, "not-valid-hex"))
         self.c.commit()

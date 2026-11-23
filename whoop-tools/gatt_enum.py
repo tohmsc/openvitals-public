@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Connect to a BLE device and dump the full GATT table + read everything readable."""
 import asyncio, sys
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 
 ADDR = sys.argv[1] if len(sys.argv) > 1 else sys.exit("usage: gatt_enum.py <BLE address>  (find it with ble_scan.py)")
 

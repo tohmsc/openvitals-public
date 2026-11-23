@@ -62,13 +62,14 @@ def _put(c, key, value):
     c.execute("INSERT INTO sync_state(key,value) VALUES(?,?) "
               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
 
-def add_motion(c, accel):
+def add_motion(c, accel, after=None):
     """Fold {unix second: (x, y, z) in g} into motion_min. Only steps between records at most
-    2 s apart count, so a gap (strap off, not yet drained) never reads as one big movement."""
+    2 s apart count, so a gap (strap off, not yet drained) never reads as one big movement.
+    `after`: leave minutes up to and including this one alone."""
     per = {}
     ts = sorted(accel)
     for a, b in zip(ts, ts[1:]):
-        if b - a <= 2:
+        if b - a <= 2 and (after is None or int(b // 60) * 60 > after):
             m = per.setdefault(int(b // 60) * 60, [0.0, 0])
             m[0] += math.dist(accel[a], accel[b]); m[1] += 1
     c.executemany("INSERT INTO motion_min(minute,move_sum,n) VALUES(?,?,?) ON CONFLICT(minute) DO UPDATE "
@@ -177,8 +178,8 @@ def backfill_strap(c, upto):
     _put(c, "strap_backfilled", "1")
 
 
-def backfill_motion(c, upto):
-    """Once: movement from stored-history frames decoded before motion_min existed."""
+def _stored_accel(c, upto):
+    """{unix second: (x, y, z)} from the stored-history frames still in ble_raw, up to a rowid."""
     accel = {}
     for r in c.execute("SELECT hex FROM ble_raw WHERE ptype = ? AND rowid <= ?", (whoop.T_HISTORICAL, upto)):
         inner = _fromhex(r["hex"])
@@ -187,8 +188,34 @@ def backfill_motion(c, upto):
             ts, g = p.get("ts"), p.get("accel_g")
             if ts and MIN_TS < ts < time.time() + 86400 and g and all(abs(x) < 16 for x in g):
                 accel.setdefault(ts, g)
-    add_motion(c, accel)
+    return accel
+
+
+def backfill_motion(c, upto):
+    """Once: movement from stored-history frames decoded before motion_min existed."""
+    add_motion(c, _stored_accel(c, upto))
     _put(c, "motion_backfilled", "1")
+
+
+def recount_motion(c, upto):
+    """Once: rebuild motion_min from the frames still in ble_raw.
+
+    Earlier versions ran the backfill right after a first decode, which added every stored
+    minute a second time (twice the sum over twice the count: the average held, the count
+    did not). Minutes whose frames archive.py already moved to R2 can't be rebuilt and stay
+    as they are, as does the oldest local minute, which may be only partly here.
+    """
+    accel = _stored_accel(c, upto)
+    if c.execute("SELECT 1 FROM raw_archive LIMIT 1").fetchone():
+        if accel:
+            first = int(min(accel) // 60) * 60
+            c.execute("DELETE FROM motion_min WHERE minute > ?", (first,))
+            add_motion(c, accel, after=first)
+    else:
+        c.execute("DELETE FROM motion_min")
+        add_motion(c, accel)
+    _put(c, "motion_backfilled", "1")
+    _put(c, "motion_recounted", "1")
 
 
 def run(full=False, quiet=False, force=False):
@@ -259,11 +286,14 @@ def _run(c, full, quiet, force):
             c.execute(f"DELETE FROM {t}")
         c.execute("DELETE FROM sync_state WHERE key IN ('strap_seq_seen', 'strap_last')")
         _put(c, "motion_backfilled", "1")
+        _put(c, "motion_recounted", "1")
         _put(c, "strap_backfilled", "1")
         last, carry, hold = 0, "", b""
     else:
         last = _resume_point(c, int(last))
-        if not db.get_state(c, "motion_backfilled"):
+        if not db.get_state(c, "motion_recounted"):
+            _section(c, "motion_recount", lambda: recount_motion(c, last))
+        elif not db.get_state(c, "motion_backfilled"):
             _section(c, "motion_backfill", lambda: backfill_motion(c, last))
         if not db.get_state(c, "strap_backfilled"):
             _section(c, "strap_backfill", lambda: backfill_strap(c, last))

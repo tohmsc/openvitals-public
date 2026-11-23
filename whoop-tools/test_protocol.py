@@ -47,6 +47,16 @@ class AckTest(unittest.TestCase):
         asyncio.run(run())
 
 
+class FrameTest(unittest.TestCase):
+    def test_noise_that_looks_like_a_huge_frame_does_not_hold_the_channel(self):
+        ln = struct.pack("<H", 60000)
+        noise = b"\xAA" + ln + bytes([whoop.crc8(ln)]) + b"\x01\x02"     # a header with a valid CRC8
+        good = whoop.build(whoop.T_REALTIME, 0, 1, b"\x02\x03")
+        out, rest = whoop.unframe(noise + good)
+        self.assertEqual(out, [bytes([whoop.T_REALTIME, 0, 1, 2, 3])])
+        self.assertEqual(rest, b"")
+
+
 class RRUnitsTest(unittest.TestCase):
     def setUp(self):
         self._orig_db = db.DB_PATH

@@ -33,7 +33,7 @@ training load. This is pattern-matching on your own numbers, not medical advice.
     python readiness.py [YYYY-MM-DD]
 """
 import json, math, statistics, sys, time
-import db, learn
+import db, learn, scores
 
 VERSION = "r1"
 MIN_BASELINE = 7          # own nights before hrv / rhr / resp are compared at all
@@ -67,9 +67,10 @@ def _signal(key, label, value, usual, unit, flag, detail, **extra):
 def _estimates(c, kind, start, end):
     if not c.execute("SELECT 1 FROM sqlite_master WHERE name='estimates'").fetchone():
         return {}
+    # the model the app shows (scores.current); an older or trial version's rows don't count
     out = {}
-    for r in c.execute("SELECT date, value, row FROM estimates WHERE kind=? AND ok=1 AND date>=? AND date<=? "
-                       "ORDER BY date, computed_at", (kind, start, end)):
+    for r in c.execute("SELECT date, value, row FROM estimates WHERE kind=? AND version=? AND ok=1 AND date>=? "
+                       "AND date<=? ORDER BY date, computed_at", (kind, scores.current(c), start, end)):
         out[r["date"]] = r
     return out
 

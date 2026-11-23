@@ -3,7 +3,7 @@
 
 Run:  .venv/bin/python -m unittest test_alarm -v
 """
-import datetime as dt, json, os, struct, tempfile, time, unittest
+import datetime as dt, json, os, struct, tempfile, unittest
 
 _TMP = tempfile.mkdtemp(prefix="whoop-test-")
 os.environ["WHOOP_DB"] = os.path.join(_TMP, "test.db")

@@ -32,8 +32,8 @@ SCHEMA = [
  "CREATE TABLE IF NOT EXISTS api_workout (id TEXT PRIMARY KEY, start TEXT, end TEXT, sport_name TEXT, score_state TEXT, strain REAL, avg_hr REAL, max_hr REAL, kilojoule REAL, distance_m REAL)",
  "CREATE TABLE IF NOT EXISTS api_profile (key TEXT PRIMARY KEY, value TEXT)",
  "CREATE TABLE IF NOT EXISTS ble_hr (ts REAL PRIMARY KEY, hr INTEGER, rr_ms TEXT)",
- "CREATE TABLE IF NOT EXISTS device_soc (rtc INTEGER PRIMARY KEY, soc_pct REAL, subsystem TEXT)",
- "CREATE TABLE IF NOT EXISTS device_logs (rtc INTEGER, subsystem TEXT, message TEXT, PRIMARY KEY (rtc, subsystem, message))",
+ "CREATE TABLE IF NOT EXISTS device_soc (rtc INTEGER PRIMARY KEY, soc_pct REAL, subsystem TEXT, seen REAL)",
+ "CREATE TABLE IF NOT EXISTS device_logs (rtc INTEGER, subsystem TEXT, message TEXT, seq INTEGER, PRIMARY KEY (rtc, subsystem, message))",
  "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)",
  sleep.SCHEMA,
  EST_TABLE,
@@ -41,6 +41,9 @@ SCHEMA = [
  "CREATE INDEX IF NOT EXISTS idx_ble_hr_ts ON ble_hr(ts)",
 ]
 MIGRATIONS = ["ALTER TABLE api_workout ADD COLUMN zone_raw TEXT"]  # safe to fail if present
+# The strap's clock (rtc) starts again after a reboot, so it can't order rows. These carry the
+# order the Mac saw them in: `seen` for battery reports, `seq` (the local rowid) for log lines.
+DEVICE_MIGRATIONS = ["ALTER TABLE device_soc ADD COLUMN seen REAL", "ALTER TABLE device_logs ADD COLUMN seq INTEGER"]
 
 ARCHIVE = {
  "api_recovery": "cycle_id,sleep_id,created_at,score_state,recovery_score,resting_hr,hrv_rmssd_ms,spo2,skin_temp_c",
@@ -175,12 +178,21 @@ def main(fast=False):
             db.set_state(c, "cloud_hr_ts", str(hr[-1]["ts"]))
         pushed["ble_hr"] += push_late_hr(c, d1)
 
+        if (has(c, "device_soc") or has(c, "device_logs")) and not db.get_state(c, "cloud_device_schema"):
+            for s in SCHEMA[6:8]:                              # a fast run can come before any full one
+                d1.q(s)
+            for m in DEVICE_MIGRATIONS:
+                d1.q(m, ok_fail=True)                          # fails when the column is already there
+            db.set_state(c, "cloud_device_schema", "1")
         if has(c, "device_soc"):
-            soc = c.execute("SELECT rtc,soc_pct,subsystem FROM device_soc ORDER BY rtc DESC LIMIT 200").fetchall()
-            pushed["device_soc"] = d1.upsert("device_soc", "rtc,soc_pct,subsystem", soc)
+            db.add_columns(c, [("device_soc", "seen", "REAL")])      # a database decode.py hasn't touched since
+            soc = c.execute("SELECT rtc,soc_pct,subsystem,seen FROM device_soc "
+                            "ORDER BY COALESCE(seen, 0) DESC, rtc DESC LIMIT 200").fetchall()
+            pushed["device_soc"] = d1.upsert("device_soc", "rtc,soc_pct,subsystem,seen", soc)
         if has(c, "device_logs"):
-            logs = c.execute("SELECT rtc,subsystem,replace(message, char(0), '') AS message FROM device_logs ORDER BY rtc DESC LIMIT 120").fetchall()
-            pushed["device_logs"] = d1.upsert("device_logs", "rtc,subsystem,message", logs)
+            logs = c.execute("SELECT rtc,subsystem,replace(message, char(0), '') AS message, rowid AS seq "
+                             "FROM device_logs ORDER BY rowid DESC LIMIT 120").fetchall()
+            pushed["device_logs"] = d1.upsert("device_logs", "rtc,subsystem,message,seq", logs)
 
         # last nights' sleep (sleep.py): small, so the last 30 go up every run
         if has(c, "sleep_night"):

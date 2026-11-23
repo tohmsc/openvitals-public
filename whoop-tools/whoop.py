@@ -75,6 +75,12 @@ def cmd(opcode: int, data: bytes = b"", seq: int = 0) -> bytes:
     return build(T_COMMAND, seq, opcode, data)
 
 
+# Longest frame taken as real. Frames from a strap are under 100 bytes; noise that happens to
+# look like a header with a huge length would otherwise hold the channel until that many
+# bytes arrived.
+MAX_FRAME = 4096
+
+
 def unframe(buf: bytes):
     """Split a byte buffer into inner payloads; returns (inners, leftover).
 
@@ -90,7 +96,7 @@ def unframe(buf: bytes):
         if len(buf) < 4:
             break
         ln = struct.unpack_from("<H", buf, 1)[0]      # len(inner) + 4 (crc32)
-        if ln < 5 or crc8(buf[1:3]) != buf[3]:        # not a real header
+        if ln < 5 or ln > MAX_FRAME or crc8(buf[1:3]) != buf[3]:   # not a real header
             buf = buf[1:]
             continue
         flen = 4 + ln                                 # AA + len(2) + crc8 + inner + crc32

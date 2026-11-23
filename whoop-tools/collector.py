@@ -32,7 +32,10 @@ def is_streamer(pid):
                              text=True, timeout=5).stdout
     except Exception:
         return True                   # can't tell: assume the lock is right
-    return any(s in cmd for s in STREAMERS)
+    # the script itself, run by Python: not any command line that only mentions the file name
+    toks = cmd.split()
+    return (bool(toks) and "python" in os.path.basename(toks[0]).lower()
+            and any(os.path.basename(t) in STREAMERS for t in toks[1:]))
 
 def lock_holder():
     """PID of the process holding the strap (daemon.py / live.py), or None.

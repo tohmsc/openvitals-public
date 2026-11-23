@@ -1,4 +1,4 @@
-import json, os, tempfile, time, unittest
+import json, os, tempfile, unittest
 
 os.environ["WHOOP_DB"] = os.path.join(tempfile.mkdtemp(), "t.db")
 import db, readiness
@@ -18,6 +18,7 @@ class ReadinessTest(unittest.TestCase):
         self.c.execute("CREATE TABLE IF NOT EXISTS estimates (date TEXT, kind TEXT, version TEXT, value REAL, ok INTEGER,"
                        " why TEXT, row TEXT, inputs TEXT, computed_at REAL, PRIMARY KEY (date, kind, version))")
         self.c.execute("DELETE FROM estimates")
+        db.set_state(self.c, "scores_model", "v1")          # the rows below are v1's
         # 20 ordinary nights: HRV 55-65 ms, resting HR 45-47
         for k in range(1, 21):
             self.c.execute("INSERT INTO daily_night(date, rhr, hrv, n_rr) VALUES(?,?,?,?)",
@@ -69,6 +70,15 @@ class ReadinessTest(unittest.TestCase):
         load = next(s for s in r["signals"] if s["key"] == "load")
         self.assertEqual(load["flag"], "bad")          # 18 / 10.5 = 1.71
         self.assertEqual(r["level"], "strained")
+
+    def test_another_models_estimates_do_not_count(self):
+        self.night(46, 60)
+        self.strain([18] * 7 + [8] * 21)
+        for k in range(1, 29):                         # a trial model's flat load, computed later
+            self.c.execute("INSERT INTO estimates(date, kind, version, value, ok, computed_at) "
+                           "VALUES(?, 'strain', 'trial', 8, 1, 9e9)", (day(-k),))
+        r = readiness.evaluate(self.c, TODAY)
+        self.assertEqual(next(s for s in r["signals"] if s["key"] == "load")["flag"], "bad")
 
     def test_breathing_rate_rise(self):
         self.night(46, 60)

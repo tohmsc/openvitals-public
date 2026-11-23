@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for scores.py: the strain curve and zones, the checks that hold an estimate back,
 and that versions sit side by side.   .venv/bin/python -m unittest test_scores"""
-import json, math, os, tempfile, time, unittest
+import json, os, tempfile, time, unittest
 
 _tmp = tempfile.mkdtemp()
 os.environ["WHOOP_DB"] = os.path.join(_tmp, "t.db")
@@ -196,6 +196,15 @@ class Selection(Base):
         db.set_state(self.c, "scores_model", "fit-test")
         self.assertEqual(scores.current(self.c), "fit-test")
         self.assertEqual(scores.get_model(self.c, "fit-test")["recovery"]["with_sleep"][2], 12.0)
+
+    def test_for_app_limit_is_days_of_each_kind(self):
+        for d in range(1, 6):
+            for kind in ("recovery", "sleep", "strain"):
+                self.c.execute("INSERT INTO estimates(date,kind,version,value,ok,row,inputs,computed_at) "
+                               "VALUES(?,?,?,?,1,'{}','{}',0)", (f"2026-01-{d:02d}", kind, "v1", d))
+        out = scores.for_app(self.c, "v1", limit=4)
+        self.assertEqual([len(out[k]) for k in ("recovery", "sleep", "cycle")], [4, 4, 4])
+        self.assertEqual(out["cycle"][0]["est_date"], "2026-01-05")
 
     def test_for_app_follows_the_install(self):
         good = {"value": 12.0, "ok": True, "why": None, "row": {"start": "x", "strain": 12.0}, "inputs": {}}

@@ -725,8 +725,10 @@ def for_app(c, version=None, limit=400):
         return out
     version = version or current(c)
     kind_to = {"recovery": "recovery", "sleep": "sleep", "strain": "cycle"}
-    for r in c.execute("SELECT date, kind, row, inputs FROM estimates WHERE version=? AND ok=1 "
-                       "ORDER BY date DESC LIMIT ?", (version, limit)):
+    # `limit` days of each kind (one LIMIT over all three kinds gave a third of that)
+    for r in c.execute("SELECT date, kind, row, inputs FROM (SELECT date, kind, row, inputs, ROW_NUMBER() OVER "
+                       "(PARTITION BY kind ORDER BY date DESC) rn FROM estimates WHERE version=? AND ok=1) "
+                       "WHERE rn <= ? ORDER BY date DESC", (version, limit)):
         target = kind_to.get(r["kind"])
         if not target:
             continue

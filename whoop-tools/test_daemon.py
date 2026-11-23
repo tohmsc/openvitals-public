@@ -554,6 +554,21 @@ class DaemonTest(unittest.TestCase):
         self.assertIsNone(collector.lock_holder())
         self.assertFalse(os.path.exists(daemon.LOCK))
 
+    def test_a_command_that_only_mentions_the_script_is_not_a_streamer(self):
+        import subprocess, sys, tempfile
+        d = tempfile.mkdtemp()
+        script = os.path.join(d, "daemon.py")
+        with open(script, "w") as f:
+            f.write("import time\ntime.sleep(30)\n")
+        other = subprocess.Popen(["sh", "-c", "sleep 30 # daemon.py"])
+        ours = subprocess.Popen([sys.executable, script])
+        try:
+            self.assertFalse(collector.is_streamer(other.pid))
+            self.assertTrue(collector.is_streamer(ours.pid))
+        finally:
+            for p in (other, ours):
+                p.kill(); p.wait()
+
     def test_stale_lock_is_cleared(self):
         child = os.fork()
         if child == 0:
